@@ -1,0 +1,27 @@
+bundle/index.js
+  s_b240fa96500fcd::t_b89fc434d692b0 38926-38928,39196,39226,39228,39239,39303
+package-lock.json
+  s_b240fa96500fcd::t_32b3a121af1f20 3,9
+package.json
+  s_b240fa96500fcd::t_a6a9a7bbb7fff9 3
+src/index.ts
+  s_b240fa96500fcd::t_c5d7e93f2dfd0e 1737-1739,2076,2109,2111,2124,2200
+tests/fixtures/provider-handoff.mjs
+  s_b240fa96500fcd::t_2b8bea00635490 17,24,187-209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "46603294b7c60548d633f18da18f642f5231ef02",
+  "prompts": {},
+  "sessions": {
+    "s_b240fa96500fcd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08128-7f36-7e21-bcb1-f7214375775d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Marius Posta <marius@distill.fyi>"
+    }
+  }
+}
