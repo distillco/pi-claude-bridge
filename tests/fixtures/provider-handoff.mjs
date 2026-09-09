@@ -107,7 +107,15 @@ test("aborting a child clears only its pending calls and leaves its parent runni
   const pa = await parent.result(); await child.result();
   queries[1].push(assistant("c", "late")); await tick();
   const pending = handler(queries[1], "late");
-  abort.abort();
+  const notifications = [];
+  for (const id of ["parent", "child"]) runWithSessionContext(id, () => {
+    ctx().session = { sessionId: `cli-${id}`, cursor: 1, cwd: scratch };
+    ctx().piUI = { notify: () => notifications.push(id) };
+  });
+  runWithSessionContext("parent", () => abort.abort());
+  assert.deepEqual(notifications, ["child"], "cancellation reports to the canceled session's UI");
+  assert.equal(runWithSessionContext("parent", () => ctx().session.needsRebuild), undefined);
+  assert.equal(runWithSessionContext("child", () => ctx().session.forceRotate), true);
   assert.equal((await pending).content[0].text, "Operation aborted");
   await tick();
   assert.equal(runWithSessionContext("child", () => ctx().pendingToolEmissions.size), 0);
@@ -206,4 +214,21 @@ for (const terminal of ["error", "abort", "quota", "timeout"]) test(`an immediat
   assert.equal(queries.length, 2);
   queries[1].push({ type: "result", subtype: "success", result: "retry completed" }); queries[1].close();
   assert.equal((await next.result()).content.at(-1).text, "retry completed");
+});
+
+
+test("retrying synchronously after abort does not attach to the canceled query", { timeout: 5000 }, async () => {
+  const controller = new AbortController();
+  const u = user("cancel me");
+  const first = call("sync-abort", [u], controller.signal);
+  runWithSessionContext("sync-abort", () => { ctx().session = { sessionId: "canceled-cli", cursor: 1, cwd: scratch }; });
+  controller.abort();
+  const next = call("sync-abort", [u, user("retry without awaiting the canceled stream")]);
+  assert.equal(queries.length, 2);
+  assert.notEqual(queries[1].input.options.resume, "canceled-cli");
+  assert.equal((await first.result()).stopReason, "aborted");
+  await tick();
+  assert.equal(queries[1].closed, false);
+  queries[1].push({ type: "result", subtype: "success", result: "fresh answer" }); queries[1].close();
+  assert.equal((await next.result()).content.at(-1).text, "fresh answer");
 });

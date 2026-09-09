@@ -37882,9 +37882,9 @@ function diagDump(label, data) {
     debug(`DIAG FAILED: ${label}`, error51);
   }
 }
-function safeNotify(message, level = "warning") {
+function safeNotify(message, level = "warning", queryCtx = ctx()) {
   try {
-    bridgeSession().piUI?.notify(message, level);
+    queryCtx.piUI?.notify(message, level);
   } catch (error51) {
     debug("notify failed:", error51);
   }
@@ -37928,8 +37928,8 @@ function reportToolResultMismatch(queryCtx, reason, cwd, opts = {}) {
     const hasMismatch = progress.expectedCount > 0 ? progress.unresolvedIds.length > 0 || progress.waitingCount > 0 || progress.queuedCount > 0 || progress.unmatchedResultCount > 0 : progress.waitingCount > 0 || progress.queuedCount > 0 || progress.unmatchedResultCount > 0;
     if (!hasMismatch) return false;
     queryCtx.reportedToolResultMismatch = true;
-    if (bridgeSession().session) {
-      bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, ...opts.forceRotate ? { forceRotate: true } : {} };
+    if (queryCtx.session) {
+      queryCtx.session = { ...queryCtx.session, needsRebuild: true, ...opts.forceRotate ? { forceRotate: true } : {} };
     }
     const toolNameSummary = compactToolNameSummary(progress.toolNames);
     diagDump("tool_result_delivery_mismatch", {
@@ -37937,16 +37937,17 @@ function reportToolResultMismatch(queryCtx, reason, cwd, opts = {}) {
       cwd,
       progress,
       activeQueryExists: queryCtx.activeQuery !== null,
-      sharedSession: bridgeSession().session ? {
-        sessionId: bridgeSession().session.sessionId.slice(0, 8),
-        cursor: bridgeSession().session.cursor,
-        needsRebuild: bridgeSession().session.needsRebuild === true,
-        forceRotate: bridgeSession().session.forceRotate === true
+      sharedSession: queryCtx.session ? {
+        sessionId: queryCtx.session.sessionId.slice(0, 8),
+        cursor: queryCtx.session.cursor,
+        needsRebuild: queryCtx.session.needsRebuild === true,
+        forceRotate: queryCtx.session.forceRotate === true
       } : null
     });
     safeNotify(
       `Claude bridge: tool result delivery interrupted during ${reason}; delivered ${progress.deliveredCount}/${progress.expectedCount}, resolved ${progress.resolvedCount}/${progress.expectedCount}, waiting=${progress.waitingCount}, queued=${progress.queuedCount}, unmatched=${progress.unmatchedResultCount}${toolNameSummary.length ? `, tools=${toolNameSummary.join(", ")}` : ""}. Claude session will rebuild before the next turn; see ${diagLogPath()}.`,
-      "error"
+      "error",
+      queryCtx
     );
     return true;
   } catch (error51) {
@@ -39207,6 +39208,8 @@ function streamForSession(model, context, options) {
   }
   const onAbort = () => {
     wasAborted = true;
+    if (abortCtx.session) abortCtx.session = { ...abortCtx.session, needsRebuild: true, forceRotate: true };
+    abortCtx.activeQuery = null;
     abortCtx.deferredUserMessages = [];
     reportToolResultMismatch(abortCtx, "abort", cwd, { forceRotate: true });
     for (const pending of abortCtx.pendingToolCalls.values()) {

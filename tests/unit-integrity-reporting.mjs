@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { QueryContext } from "../src/query-state.js";
+import { ctx, resetStack } from "../src/query-state.js";
 import { __testGetBridgeIntegrityState, __testSetBridgeIntegrityState, reportToolResultMismatch } from "../src/index.js";
 
 let dir;
@@ -10,7 +10,7 @@ let diagPath;
 let notifications;
 
 function makeMismatchContext() {
-	const queryCtx = new QueryContext();
+	const queryCtx = ctx();
 	queryCtx.activeQuery = { id: "query" };
 	queryCtx.recordToolCall("t0", "read", { path: "safe.txt" });
 	queryCtx.recordToolCall("t1", "bash", { command: "echo should-not-leak" });
@@ -27,6 +27,7 @@ function readDiagEntries() {
 
 describe("tool-result integrity reporting", () => {
 	beforeEach(() => {
+		resetStack();
 		dir = mkdtempSync("/tmp/claude-bridge-integrity-");
 		diagPath = join(dir, "diag.log");
 		process.env.CLAUDE_BRIDGE_DIAG_PATH = diagPath;

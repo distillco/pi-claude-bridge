@@ -361,8 +361,8 @@ function diagDump(label: string, data: Record<string, unknown>) {
 	}
 }
 
-function safeNotify(message: string, level: "info" | "warning" | "error" = "warning"): void {
-	try { bridgeSession().piUI?.notify(message, level); }
+function safeNotify(message: string, level: "info" | "warning" | "error" = "warning", queryCtx: QueryContext = ctx()): void {
+	try { queryCtx.piUI?.notify(message, level); }
 	catch (error) { debug("notify failed:", error); }
 }
 
@@ -413,8 +413,8 @@ export function reportToolResultMismatch(queryCtx: QueryContext, reason: string,
 			: progress.waitingCount > 0 || progress.queuedCount > 0 || progress.unmatchedResultCount > 0;
 		if (!hasMismatch) return false;
 		queryCtx.reportedToolResultMismatch = true;
-		if (bridgeSession().session) {
-			bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, ...(opts.forceRotate ? { forceRotate: true } : {}) };
+		if (queryCtx.session) {
+			queryCtx.session = { ...queryCtx.session, needsRebuild: true, ...(opts.forceRotate ? { forceRotate: true } : {}) };
 		}
 		const toolNameSummary = compactToolNameSummary(progress.toolNames);
 		diagDump("tool_result_delivery_mismatch", {
@@ -422,11 +422,11 @@ export function reportToolResultMismatch(queryCtx: QueryContext, reason: string,
 			cwd,
 			progress,
 			activeQueryExists: queryCtx.activeQuery !== null,
-			sharedSession: bridgeSession().session ? {
-				sessionId: bridgeSession().session.sessionId.slice(0, 8),
-				cursor: bridgeSession().session.cursor,
-				needsRebuild: bridgeSession().session.needsRebuild === true,
-				forceRotate: bridgeSession().session.forceRotate === true,
+			sharedSession: queryCtx.session ? {
+				sessionId: queryCtx.session.sessionId.slice(0, 8),
+				cursor: queryCtx.session.cursor,
+				needsRebuild: queryCtx.session.needsRebuild === true,
+				forceRotate: queryCtx.session.forceRotate === true,
 			} : null,
 		});
 		safeNotify(
@@ -436,6 +436,7 @@ export function reportToolResultMismatch(queryCtx: QueryContext, reason: string,
 			`${toolNameSummary.length ? `, tools=${toolNameSummary.join(", ")}` : ""}. ` +
 			`Claude session will rebuild before the next turn; see ${diagLogPath()}.`,
 			"error",
+			queryCtx,
 		);
 		return true;
 	} catch (error) {
@@ -2088,6 +2089,10 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 	}
 	const onAbort = () => {
 		wasAborted = true;
+    // AbortSignal listeners run in the caller's async context. Mutate only the
+    // captured query, and release it synchronously before a caller can retry.
+    if (abortCtx.session) abortCtx.session = { ...abortCtx.session, needsRebuild: true, forceRotate: true };
+    abortCtx.activeQuery = null;
 		// Prevent canceled messages from being replayed in this session.
 		abortCtx.deferredUserMessages = [];
 		reportToolResultMismatch(abortCtx, "abort", cwd, { forceRotate: true });
