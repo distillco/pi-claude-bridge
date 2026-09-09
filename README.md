@@ -78,3 +78,12 @@ Set `CLAUDE_BRIDGE_DEBUG=1` to write bridge logs to `~/.pi/agent/claude-bridge.l
 ## Upstream
 
 Original package: [`@vanillagreen/pi-claude-bridge`](https://www.npmjs.com/package/@vanillagreen/pi-claude-bridge)
+
+
+### Session routing and tool delivery in 1.5.6
+
+The provider uses Pi's `options.sessionId` for query routing and Claude session persistence. Nested Agent sessions have their own active query, tool handlers, UI/API callbacks, and Claude session pointer even when they share a working directory and provider registry. Direct callers without a session ID can use a stable turn AbortSignal. The bridge does not infer identity from the sole active query or the working directory.
+
+Completed Pi outputs are no longer mutated when the SDK sends additional tool blocks. The bridge queues undelivered calls for the next Pi stream, deduplicates completed tool IDs across SDK echoes, and drops the pending queue on cancellation. MCP registration alone no longer counts as delivery to Pi.
+
+These fixes address Manta task `c-6560f827b518`: its child prompt was routed into the parent query at 2026-09-09 00:25:10 UTC; after a watchdog retry, MCP tool `toolu_01Cu8C2jCPaohYJESpgN4kv9` waited for thirty minutes although Pi never received that call. Tests use a mocked Claude SDK with real Pi streams and a real Pi agent loop, covering nested sessions, late parallel calls, duplicate echoes, cancellation, immediate subsequent prompts, and child lifecycle events. No model credentials are required for those tests.

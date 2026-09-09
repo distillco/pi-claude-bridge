@@ -1,6 +1,6 @@
 {
   "name": "@timsu/pi-claude-bridge",
-  "version": "1.5.1",
+  "version": "1.5.8",
   "description": "Pi provider bridge that runs Claude Code through the Claude Agent SDK. Fork of @vanillagreen/pi-claude-bridge with concurrent-task isolation.",
   "type": "module",
   "keywords": [
@@ -162,7 +162,7 @@
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=bundle/index.js --external:@earendil-works/pi-ai --external:@earendil-works/pi-coding-agent",
     "prepack": "npm run build",
-    "test:unit": "node --import tsx --test tests/unit-*.mjs",
+    "test:unit": "node --import ./tests/lib/pi-compat.mjs --import tsx --test tests/unit-*.mjs",
     "test": "set -a && [ -f .env.test ] && . ./.env.test; set +a && npm run test:unit && tests/int-smoke.sh && tests/int-multi-turn.sh && tests/int-cache.sh && node --import tsx --test tests/int-*.mjs",
     "test:usage": "tests/usage-test.sh",
     "typecheck": "tsc --noEmit"

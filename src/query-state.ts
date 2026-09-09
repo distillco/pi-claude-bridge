@@ -5,9 +5,12 @@
 // Adding a new field = one property on the class.
 //
 // Extracted from index.ts so tests can import without activating the extension.
+// Provider entry points select a session store; the legacy stack helpers remain
+// for direct callers, and are not used to route parent/child provider calls.
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AssistantMessage, AssistantMessageEventStream, Model } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { McpResult } from "./extract-tool-results.js";
 
 export interface PendingToolCall {
@@ -82,7 +85,33 @@ function unique(values: Iterable<string | undefined>): string[] {
 	return out;
 }
 
+export interface SessionState {
+	sessionId: string;
+	cursor: number;
+	cwd: string;
+	// Force the next syncSharedSession call down the REBUILD path. Set when
+	// pi has mutated its messages array out from under us (compact, tree
+	// navigation) or after an abort left the JSONL in an indeterminate state.
+	// REBUILD wipes and rewrites the file to match pi's current history.
+	needsRebuild?: boolean;
+	// Set ONLY after an abort. The killed CC subprocess may still be flushing
+	// a late "[Request interrupted by user]" record to the session JSONL.
+	// Reusing the same sessionId/path would race that orphan write into our
+	// fresh file and break CC's parent-uuid chain on the next resume. When
+	// this flag is set, REBUILD takes a fresh UUID and skips deleteSession
+	// so the orphan writes land on a dead inode. Compact/tree do NOT set
+	// this — there's no concurrent CC writer during those events, so
+	// in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
+	forceRotate?: boolean;
+}
+
 export class QueryContext {
+  // Session state belongs to the Pi conversation, including nested Agent sessions.
+  session: SessionState | null = null;
+  extensionApi: ExtensionAPI | undefined;
+  piUI: ExtensionUIContext | undefined;
+  emittedToolCallIds = new Set<string>();
+  pendingToolEmissions = new Map<string, TurnToolCallRecord>();
 	// Query-scoped (fully isolated per query)
 	activeQuery: unknown | null = null;
 	currentPiStream: AssistantMessageEventStream | null = null;
@@ -245,7 +274,46 @@ interface TurnStore {
 // Per-turn AsyncLocalStorage so concurrent top-level turns each get their own
 // isolated QueryContext. Falls back to module-level singletons for code paths
 // (tests, non-concurrent Pi use) that don't call runWithFreshTurnContext.
-const turnStorage = new AsyncLocalStorage<TurnStore>();
+// Extension instances share a provider registry. Share its routing state as well,
+// so a child's lifecycle callback and the original provider use the same store.
+const runtimeKey = Symbol.for("claude-bridge:session-routing-v2");
+const globals = globalThis as Record<symbol, any>;
+const runtime: {
+  storage: AsyncLocalStorage<TurnStore>;
+  sessions: Map<string, TurnStore>;
+  anonymous: WeakMap<object, TurnStore>;
+} = globals[runtimeKey] ??= {
+  storage: new AsyncLocalStorage<TurnStore>(),
+  sessions: new Map(),
+  anonymous: new WeakMap(),
+};
+const turnStorage = runtime.storage;
+
+/** Pi passes sessionId on every provider call. Older direct callers can use
+ * their turn's AbortSignal as identity; neither path guesses from active queries.
+ * Always enter the selected store, even when a child inherits its parent's ALS. */
+export function runWithSessionContext<T>(key: string | object | undefined, fn: () => T, freshWhenIdle = false): T {
+  if (!key) return runWithFreshTurnContext(fn);
+  let store = typeof key === "string" ? runtime.sessions.get(key) : runtime.anonymous.get(key);
+  if (!store || (freshWhenIdle && !store.ctx.activeQuery)) {
+    const next = new QueryContext();
+    if (store) {
+      next.session = store.ctx.session ? { ...store.ctx.session } : null;
+      next.extensionApi = store.ctx.extensionApi;
+      next.piUI = store.ctx.piUI;
+    }
+    // Old teardown callbacks retain their own store and cannot clear or classify
+    // a new query started immediately after Pi receives the final answer.
+    store = { ctx: next, contextStack: [] };
+    if (typeof key === "string") runtime.sessions.set(key, store);
+    else runtime.anonymous.set(key, store);
+  }
+  return turnStorage.run(store, fn);
+}
+
+export function forgetSessionContext(key: string): void {
+  runtime.sessions.delete(key);
+}
 let _fallbackCtx = new QueryContext();
 const _fallbackStack: QueryContext[] = [];
 
@@ -302,4 +370,6 @@ export function isInTurnContext(): boolean {
 export function resetStack(): void {
 	_fallbackCtx = new QueryContext();
 	_fallbackStack.length = 0;
+	runtime.sessions.clear();
+	runtime.anonymous = new WeakMap();
 }
