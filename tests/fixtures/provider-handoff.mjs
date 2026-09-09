@@ -14,12 +14,14 @@ class Query {
   messages = [];
   waiting;
   closed = false;
+  failure;
   constructor(input) { this.input = input; }
   push(message) {
     if (this.waiting) { const resolve = this.waiting; this.waiting = undefined; resolve({ value: message, done: false }); }
     else this.messages.push(message);
   }
   next() {
+    if (this.failure) return Promise.reject(this.failure);
     if (this.messages.length) return Promise.resolve({ value: this.messages.shift(), done: false });
     if (this.closed) return Promise.resolve({ done: true });
     return new Promise(resolve => { this.waiting = resolve; });
@@ -181,4 +183,27 @@ test("child lifecycle events do not clear the parent's pointer or provider regis
   assert.equal(runWithSessionContext("parent", () => ctx().session.sessionId), "cli-parent");
   assert.equal(runWithSessionContext("child", () => ctx().session), null);
   delete globalThis[key];
+});
+
+for (const terminal of ["error", "abort", "quota", "timeout"]) test(`an immediate retry after ${terminal} starts a separate query`, { timeout: 5000 }, async () => {
+  const controller = new AbortController();
+  const u = user("first attempt");
+  const previousTimeout = process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT;
+  if (terminal === "timeout") process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT = "20ms";
+  const first = call("retry", [u], controller.signal);
+  if (previousTimeout === undefined) delete process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT;
+  else process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT = previousTimeout;
+  if (terminal === "abort") controller.abort();
+  else if (terminal === "quota") {
+    queries[0].push({ type: "result", subtype: "error_during_execution", errors: ["Extra usage credits required"] });
+  } else if (terminal === "error") {
+    queries[0].failure = new Error("provider unavailable");
+    queries[0].push({ type: "system", subtype: "init", session_id: "failed-cli" });
+  }
+  const failed = await first.result();
+  assert.ok(["error", "aborted"].includes(failed.stopReason));
+  const next = call("retry", [u, failed, user("retry now")]);
+  assert.equal(queries.length, 2);
+  queries[1].push({ type: "result", subtype: "success", result: "retry completed" }); queries[1].close();
+  assert.equal((await next.result()).content.at(-1).text, "retry completed");
 });

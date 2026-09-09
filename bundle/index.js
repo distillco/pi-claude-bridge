@@ -38923,6 +38923,9 @@ async function consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConf
           const errors = errorLines.length > 0 ? errorLines.join("\n") : String(message.subtype ?? "Claude Code rate limit");
           const openedExtraUsage = launchExtraUsageHelperIfAllowed(cwd, bridgeConfig, "result error");
           ctx().handledTerminalError = true;
+          ctx().deferredUserMessages = [];
+          bridgeSession().session = null;
+          ctx().activeQuery = null;
           ctx().turnOutput.stopReason = "error";
           ctx().turnOutput.errorMessage = `${errors}${openedExtraUsage ? "\n\nOpened Claude Code /extra-usage helper. Complete billing/admin flow in the browser, then retry the prompt." : "\n\nRun /claude-bridge:extra, or enable Allow extra usage helper in settings."}`;
           ctx().currentPiStream?.push({ type: "error", reason: "error", error: ctx().turnOutput });
@@ -39190,6 +39193,7 @@ function streamForSession(model, context, options) {
           streamIdleTimeoutMs: timeoutMs
         });
       }
+      abortCtx.activeQuery = null;
       abortCtx.currentPiStream?.push({ type: "error", reason: "error", error: abortCtx.turnOutput });
       abortCtx.currentPiStream?.end();
       abortCtx.currentPiStream = null;
@@ -39219,9 +39223,9 @@ function streamForSession(model, context, options) {
   }
   consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted).then(async ({ capturedSessionId }) => {
     debug(`provider: consumeQuery completed, stopReason=${ctx().turnOutput?.stopReason}, error=${ctx().turnOutput?.errorMessage}, aborted=${wasAborted}`);
-    if (streamIdleTimedOut) {
+    if (streamIdleTimedOut || ctx().handledTerminalError) {
       abortCtx.deferredUserMessages = [];
-      debug("provider: stream idle timeout already surfaced; skipping normal completion");
+      debug("provider: terminal error already surfaced; skipping normal completion");
       return;
     }
     if (wasAborted || options?.signal?.aborted) {
@@ -39232,6 +39236,7 @@ function streamForSession(model, context, options) {
         ctx().turnOutput.stopReason = "aborted";
         ctx().turnOutput.errorMessage = "Operation aborted";
       }
+      ctx().activeQuery = null;
       ctx().currentPiStream?.push({ type: "error", reason: "aborted", error: ctx().turnOutput });
       ctx().currentPiStream?.end();
       ctx().currentPiStream = null;
@@ -39295,6 +39300,7 @@ function streamForSession(model, context, options) {
       ctx().turnOutput.stopReason = options?.signal?.aborted ? "aborted" : "error";
       ctx().turnOutput.errorMessage = `${error51 instanceof Error ? error51.message : String(error51)}${openedExtraUsage ? "\n\nOpened Claude Code /extra-usage helper. Complete billing/admin flow in the browser, then retry the prompt." : ""}`;
     }
+    ctx().activeQuery = null;
     ctx().currentPiStream?.push({ type: "error", reason: ctx().turnOutput?.stopReason ?? "error", error: ctx().turnOutput });
     ctx().currentPiStream?.end();
     ctx().currentPiStream = null;

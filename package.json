@@ -1,6 +1,6 @@
 {
   "name": "@timsu/pi-claude-bridge",
-  "version": "1.5.6",
+  "version": "1.5.7",
   "description": "Pi provider bridge that runs Claude Code through the Claude Agent SDK. Fork of @vanillagreen/pi-claude-bridge with concurrent-task isolation.",
   "type": "module",
   "keywords": [
