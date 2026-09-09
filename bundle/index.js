@@ -22436,6 +22436,12 @@ function unique(values) {
   return out;
 }
 var QueryContext = class {
+  // Session state belongs to the Pi conversation, including nested Agent sessions.
+  session = null;
+  extensionApi;
+  piUI;
+  emittedToolCallIds = /* @__PURE__ */ new Set();
+  pendingToolEmissions = /* @__PURE__ */ new Map();
   // Query-scoped (fully isolated per query)
   activeQuery = null;
   currentPiStream = null;
@@ -22576,7 +22582,33 @@ var QueryContext = class {
     };
   }
 };
-var turnStorage = new AsyncLocalStorage();
+var runtimeKey = /* @__PURE__ */ Symbol.for("claude-bridge:session-routing-v2");
+var globals = globalThis;
+var runtime = globals[runtimeKey] ??= {
+  storage: new AsyncLocalStorage(),
+  sessions: /* @__PURE__ */ new Map(),
+  anonymous: /* @__PURE__ */ new WeakMap()
+};
+var turnStorage = runtime.storage;
+function runWithSessionContext(key, fn, freshWhenIdle = false) {
+  if (!key) return runWithFreshTurnContext(fn);
+  let store = typeof key === "string" ? runtime.sessions.get(key) : runtime.anonymous.get(key);
+  if (!store || freshWhenIdle && !store.ctx.activeQuery) {
+    const next = new QueryContext();
+    if (store) {
+      next.session = store.ctx.session ? { ...store.ctx.session } : null;
+      next.extensionApi = store.ctx.extensionApi;
+      next.piUI = store.ctx.piUI;
+    }
+    store = { ctx: next, contextStack: [] };
+    if (typeof key === "string") runtime.sessions.set(key, store);
+    else runtime.anonymous.set(key, store);
+  }
+  return turnStorage.run(store, fn);
+}
+function forgetSessionContext(key) {
+  runtime.sessions.delete(key);
+}
 var _fallbackCtx = new QueryContext();
 var _fallbackStack = [];
 function ctx() {
@@ -22585,53 +22617,8 @@ function ctx() {
 function stackDepth() {
   return (turnStorage.getStore()?.contextStack ?? _fallbackStack).length;
 }
-function pushContext() {
-  const store = turnStorage.getStore();
-  if (store) {
-    if (!store.ctx.activeQuery) throw new Error("pushContext() called with no active query");
-    store.contextStack.push(store.ctx);
-    store.ctx = new QueryContext();
-  } else {
-    if (!_fallbackCtx.activeQuery) throw new Error("pushContext() called with no active query");
-    _fallbackStack.push(_fallbackCtx);
-    _fallbackCtx = new QueryContext();
-  }
-}
-function popContext() {
-  const store = turnStorage.getStore();
-  if (store) {
-    if (store.contextStack.length === 0) throw new Error("popContext() called with empty stack");
-    const parent = store.contextStack[store.contextStack.length - 1];
-    parent.deferredUserMessages.push(...store.ctx.deferredUserMessages);
-    store.ctx = store.contextStack.pop();
-  } else {
-    if (_fallbackStack.length === 0) throw new Error("popContext() called with empty stack");
-    const parent = _fallbackStack[_fallbackStack.length - 1];
-    parent.deferredUserMessages.push(..._fallbackCtx.deferredUserMessages);
-    _fallbackCtx = _fallbackStack.pop();
-  }
-}
 function runWithFreshTurnContext(fn) {
   return turnStorage.run({ ctx: new QueryContext(), contextStack: [] }, fn);
-}
-function isInTurnContext() {
-  return turnStorage.getStore() !== void 0;
-}
-var activeTurnStores = /* @__PURE__ */ new Set();
-function currentTurnStore() {
-  return turnStorage.getStore();
-}
-function registerActiveTurnStore(store) {
-  if (store) activeTurnStores.add(store);
-}
-function unregisterActiveTurnStore(store) {
-  if (store) activeTurnStores.delete(store);
-}
-function runInActiveTurnStore(fn) {
-  if (activeTurnStores.size !== 1) return { ran: false };
-  const store = activeTurnStores.values().next().value;
-  if (!store.ctx.activeQuery && !store.contextStack.some((c2) => c2.activeQuery)) return { ran: false };
-  return { ran: true, result: turnStorage.run(store, fn) };
 }
 
 // src/tool-pairing-audit.ts
@@ -37897,7 +37884,7 @@ function diagDump(label, data) {
 }
 function safeNotify(message, level = "warning") {
   try {
-    piUI?.notify(message, level);
+    bridgeSession().piUI?.notify(message, level);
   } catch (error51) {
     debug("notify failed:", error51);
   }
@@ -37941,8 +37928,8 @@ function reportToolResultMismatch(queryCtx, reason, cwd, opts = {}) {
     const hasMismatch = progress.expectedCount > 0 ? progress.unresolvedIds.length > 0 || progress.waitingCount > 0 || progress.queuedCount > 0 || progress.unmatchedResultCount > 0 : progress.waitingCount > 0 || progress.queuedCount > 0 || progress.unmatchedResultCount > 0;
     if (!hasMismatch) return false;
     queryCtx.reportedToolResultMismatch = true;
-    if (sharedSession) {
-      sharedSession = { ...sharedSession, needsRebuild: true, ...opts.forceRotate ? { forceRotate: true } : {} };
+    if (bridgeSession().session) {
+      bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, ...opts.forceRotate ? { forceRotate: true } : {} };
     }
     const toolNameSummary = compactToolNameSummary(progress.toolNames);
     diagDump("tool_result_delivery_mismatch", {
@@ -37950,11 +37937,11 @@ function reportToolResultMismatch(queryCtx, reason, cwd, opts = {}) {
       cwd,
       progress,
       activeQueryExists: queryCtx.activeQuery !== null,
-      sharedSession: sharedSession ? {
-        sessionId: sharedSession.sessionId.slice(0, 8),
-        cursor: sharedSession.cursor,
-        needsRebuild: sharedSession.needsRebuild === true,
-        forceRotate: sharedSession.forceRotate === true
+      sharedSession: bridgeSession().session ? {
+        sessionId: bridgeSession().session.sessionId.slice(0, 8),
+        cursor: bridgeSession().session.cursor,
+        needsRebuild: bridgeSession().session.needsRebuild === true,
+        forceRotate: bridgeSession().session.forceRotate === true
       } : null
     });
     safeNotify(
@@ -37968,11 +37955,11 @@ function reportToolResultMismatch(queryCtx, reason, cwd, opts = {}) {
   }
 }
 function __testSetBridgeIntegrityState(state) {
-  if ("ui" in state) piUI = state.ui;
-  if ("sharedSession" in state) sharedSession = state.sharedSession ?? null;
+  if ("ui" in state) bridgeSession().piUI = state.ui;
+  if ("sharedSession" in state) bridgeSession().session = state.sharedSession ?? null;
 }
 function __testGetBridgeIntegrityState() {
-  return { sharedSession };
+  return { sharedSession: bridgeSession().session };
 }
 function __testSyncSharedSession(messages, cwd) {
   return syncSharedSession(messages, cwd);
@@ -38025,9 +38012,9 @@ var CLAUDE_BRIDGE_TOOL_ISOLATION = {
   disallowedTools: DISALLOWED_BUILTIN_TOOLS,
   allowedTools: [`mcp__${MCP_SERVER_NAME}__*`]
 };
-var sharedSession = null;
-var extensionApi;
-var piUI;
+function bridgeSession() {
+  return ctx();
+}
 var extraUsageHelperInFlight = null;
 var RATE_LIMIT_AUTO_RESUME_EVENT = "vstack:rate-limit";
 var RATE_LIMIT_TOKEN = "\x1B[31m[rate-limit]\x1B[39m";
@@ -38172,7 +38159,7 @@ function formatAllowedRateLimitWarning(info) {
 }
 function emitRateLimitEvent(payload) {
   try {
-    extensionApi?.events?.emit?.(RATE_LIMIT_AUTO_RESUME_EVENT, payload);
+    bridgeSession().extensionApi?.events?.emit?.(RATE_LIMIT_AUTO_RESUME_EVENT, payload);
   } catch {
   }
 }
@@ -38218,11 +38205,11 @@ function launchExtraUsageHelperIfAllowed(cwd, config2, reason) {
   if (!extraUsageAllowed(config2)) return false;
   if (extraUsageHelperInFlight) return true;
   extraUsageHelperInFlight = runExtraUsageHelper(cwd, config2).then((message) => {
-    piUI?.notify(`Claude extra usage helper: ${message}`, "info");
+    bridgeSession().piUI?.notify(`Claude extra usage helper: ${message}`, "info");
     return message;
   }).catch((error51) => {
     const message = error51 instanceof Error ? error51.message : String(error51);
-    piUI?.notify(`Claude extra usage helper failed after ${reason}: ${message}`, "error");
+    bridgeSession().piUI?.notify(`Claude extra usage helper failed after ${reason}: ${message}`, "error");
     throw error51;
   }).finally(() => {
     extraUsageHelperInFlight = null;
@@ -38311,12 +38298,13 @@ function restoreSharedSessionFromPi(ctx2) {
     debug(`restoreSharedSession: Claude session missing for ${persisted.sessionId.slice(0, 8)}`);
     return;
   }
-  sharedSession = { sessionId: persisted.sessionId, cursor, cwd: persisted.cwd };
+  bridgeSession().session = { sessionId: persisted.sessionId, cursor, cwd: persisted.cwd };
   debug(`restoreSharedSession: restored ${persisted.sessionId.slice(0, 8)}, cursor=${cursor}`);
 }
 function schedulePersistSharedSession(ctxLike) {
-  if (!extensionApi || !sharedSession || !ctxLike?.sessionManager) return;
-  const snapshot = { ...sharedSession };
+  if (!bridgeSession().extensionApi || !bridgeSession().session || !ctxLike?.sessionManager) return;
+  const snapshot = { ...bridgeSession().session };
+  const api = bridgeSession().extensionApi;
   const timer = setTimeout(() => {
     try {
       const built = readBuiltSessionContext(ctxLike.sessionManager);
@@ -38329,7 +38317,7 @@ function schedulePersistSharedSession(ctxLike) {
         piSessionId: typeof ctxLike.sessionManager?.getSessionId === "function" ? ctxLike.sessionManager.getSessionId() : void 0,
         updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       };
-      extensionApi?.appendEntry(BRIDGE_SESSION_CUSTOM_TYPE, data);
+      api.appendEntry(BRIDGE_SESSION_CUSTOM_TYPE, data);
       debug(`persistSharedSession: saved ${data.sessionId.slice(0, 8)}, cursor=${data.cursor}`);
     } catch (error51) {
       debug("persistSharedSession failed:", error51);
@@ -38426,7 +38414,7 @@ function verifyWrittenSession2(jsonlPath, expectedSessionId, expectedRecordCount
   const warnings = verifyWrittenSession(jsonlPath, expectedSessionId, expectedRecordCount);
   for (const msg of warnings) {
     debug(`WARNING session verify: ${msg}`);
-    piUI?.notify(
+    bridgeSession().piUI?.notify(
       `Session file issue: ${msg}
 cwd=${cwd} realpath=${safeRealpath(cwd)} CLAUDE_CONFIG_DIR=${process.env.CLAUDE_CONFIG_DIR ?? "(unset)"}
 Please copy and paste this message into a new issue at https://github.com/elidickinson/pi-claude-bridge/issues/new` + (DEBUG ? ` and attach ${DEBUG_LOG_PATH}` : ` (rerun with CLAUDE_BRIDGE_DEBUG=1 to capture a debug log)`),
@@ -38460,20 +38448,20 @@ function debugSessionPaths(label, cwd, jsonlPath) {
 }
 function syncSharedSession(messages, cwd, customToolNameToSdk, modelId) {
   const priorMessages = messages.slice(0, -1);
-  const cwdChanged = sharedSession !== null && canonicalize(sharedSession.cwd) !== canonicalize(cwd);
+  const cwdChanged = bridgeSession().session !== null && canonicalize(bridgeSession().session.cwd) !== canonicalize(cwd);
   if (cwdChanged) {
-    debug(`syncSharedSession: cwd changed (${sharedSession.cwd} \u2192 ${cwd}) \u2014 foreign session pointer, rotating`);
+    debug(`syncSharedSession: cwd changed (${bridgeSession().session.cwd} \u2192 ${cwd}) \u2014 foreign session pointer, rotating`);
   }
-  if (sharedSession && !sharedSession.needsRebuild && !cwdChanged && priorMessages.length >= sharedSession.cursor) {
-    const missed = priorMessages.slice(sharedSession.cursor);
+  if (bridgeSession().session && !bridgeSession().session.needsRebuild && !cwdChanged && priorMessages.length >= bridgeSession().session.cursor) {
+    const missed = priorMessages.slice(bridgeSession().session.cursor);
     const trailingAssistantOnly = missed.length === 1 && missed[0].role === "assistant";
     if (missed.length === 0 || trailingAssistantOnly) {
       if (trailingAssistantOnly) {
-        sharedSession = { ...sharedSession, cursor: priorMessages.length, cwd };
+        bridgeSession().session = { ...bridgeSession().session, cursor: priorMessages.length, cwd };
       }
-      debug(`Case 3: ${trailingAssistantOnly ? "advanced cursor past trailing assistant, " : ""}resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
-      debug(`syncResult: path=reuse sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
-      return { sessionId: sharedSession.sessionId };
+      debug(`Case 3: ${trailingAssistantOnly ? "advanced cursor past trailing assistant, " : ""}resuming session ${bridgeSession().session.sessionId.slice(0, 8)}, cursor=${bridgeSession().session.cursor}`);
+      debug(`syncResult: path=reuse sessionId=${bridgeSession().session.sessionId} cursor=${bridgeSession().session.cursor}`);
+      return { sessionId: bridgeSession().session.sessionId };
     }
   }
   if (priorMessages.length === 0) {
@@ -38481,9 +38469,9 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId) {
     debug(`syncResult: path=clean-start`);
     return { sessionId: null };
   }
-  const previousSessionId = sharedSession?.sessionId;
-  const previousCursor = sharedSession?.cursor ?? 0;
-  const preserveId = previousSessionId !== void 0 && !sharedSession?.forceRotate && !cwdChanged;
+  const previousSessionId = bridgeSession().session?.sessionId;
+  const previousCursor = bridgeSession().session?.cursor ?? 0;
+  const preserveId = previousSessionId !== void 0 && !bridgeSession().session?.forceRotate && !cwdChanged;
   if (preserveId) {
     deleteSession(previousSessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
   }
@@ -38496,7 +38484,7 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId) {
   convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd);
   session.save();
   verifyWrittenSession2(session.jsonlPath, session.sessionId, session.messages.length, cwd);
-  sharedSession = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
+  bridgeSession().session = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
   if (previousSessionId === void 0) {
     debug(`Case 2: first turn with ${priorMessages.length} prior messages \u2192 session ${session.sessionId.slice(0, 8)}, ${session.messages.length} records`);
   } else if (preserveId) {
@@ -38690,12 +38678,12 @@ function processStreamEvent(message, customToolNameToPi, model) {
     return;
   }
   if (event?.type === "message_start") {
-    c2.resetToolTracking();
     updateTurnOutputModel(event.message?.model);
     if (event.message?.usage) updateUsage(c2.turnOutput, event.message.usage, model);
     return;
   }
   if (event?.type === "content_block_start") {
+    if (event.content_block?.type === "tool_use" && c2.emittedToolCallIds.has(event.content_block.id)) return;
     c2.turnSawStreamEvent = true;
     ensureTurnStarted();
     if (event.content_block?.type === "text") {
@@ -38778,27 +38766,55 @@ function processStreamEvent(message, customToolNameToPi, model) {
     return;
   }
   if (event?.type === "message_stop" && c2.turnSawToolCall) {
-    c2.turnOutput.stopReason = "toolUse";
-    c2.currentPiStream.push({ type: "done", reason: "toolUse", message: c2.turnOutput });
-    c2.currentPiStream.end();
-    c2.currentPiStream = null;
+    finishToolUseStream();
     return;
   }
   if (event?.type !== "message_stop" && event?.type !== "ping") {
     debug("processStreamEvent: unhandled event type", event?.type);
   }
 }
+function finishToolUseStream() {
+  const c2 = ctx();
+  if (!c2.currentPiStream || !c2.turnOutput) return;
+  for (const block of c2.turnBlocks) {
+    if (block.type === "toolCall") c2.emittedToolCallIds.add(block.id);
+  }
+  c2.turnOutput.stopReason = "toolUse";
+  c2.currentPiStream.push({ type: "done", reason: "toolUse", message: c2.turnOutput });
+  c2.currentPiStream.end();
+  c2.currentPiStream = null;
+}
+function flushPendingToolEmissions() {
+  const c2 = ctx();
+  if (!c2.currentPiStream || !c2.pendingToolEmissions.size) return;
+  for (const call of c2.pendingToolEmissions.values()) {
+    if (c2.emittedToolCallIds.has(call.id)) continue;
+    ensureTurnStarted();
+    const block = { type: "toolCall", id: call.id, name: call.toolName, arguments: call.arguments };
+    c2.turnBlocks.push(block);
+    const contentIndex = c2.turnBlocks.length - 1;
+    c2.currentPiStream.push({ type: "toolcall_start", contentIndex, partial: c2.turnOutput });
+    c2.currentPiStream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: c2.turnOutput });
+    c2.turnSawToolCall = true;
+  }
+  c2.pendingToolEmissions.clear();
+  if (c2.turnSawToolCall) finishToolUseStream();
+}
 function appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi) {
   const c2 = ctx();
   if (!assistantMsg?.content) return false;
   let sawToolUse = false;
   for (const block of assistantMsg.content) {
-    if (block.type !== "tool_use") continue;
-    sawToolUse = true;
+    if (block.type !== "tool_use" || c2.emittedToolCallIds.has(block.id)) continue;
     const existingIdx = c2.turnBlocks.findIndex((b2) => b2.type === "toolCall" && b2.id === block.id);
     const name = mapToolName(block.name, customToolNameToPi);
     const mappedArgs = mapToolArgs(name, block.input);
     c2.recordToolCall(block.id, name, mappedArgs);
+    if (!c2.currentPiStream) {
+      c2.pendingToolEmissions.set(block.id, { id: block.id, toolName: name, arguments: mappedArgs });
+      continue;
+    }
+    sawToolUse = true;
     if (existingIdx >= 0) {
       const existing = c2.turnBlocks[existingIdx];
       existing.name = name;
@@ -38830,21 +38846,18 @@ function processAssistantMessage(message, model, customToolNameToPi) {
   const c2 = ctx();
   const assistantMsg = message.message;
   if (!assistantMsg?.content) return;
+  if (!c2.currentPiStream) {
+    appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi);
+    return;
+  }
   updateTurnOutputModel(assistantMsg.model);
   if (c2.turnSawStreamEvent) {
     if (appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi)) {
       c2.turnSawToolCall = true;
-      if (c2.currentPiStream && c2.turnOutput) {
-        c2.turnOutput.stopReason = "toolUse";
-        c2.currentPiStream.push({ type: "done", reason: "toolUse", message: c2.turnOutput });
-        c2.currentPiStream.end();
-        c2.currentPiStream = null;
-        debug("processAssistantMessage boundary: ended streamed tool_use turn from assistant message");
-      }
+      finishToolUseStream();
     }
     return;
   }
-  c2.resetToolTracking();
   debug(`processAssistantMessage fallback: ${assistantMsg.content.length} blocks, types=${assistantMsg.content.map((b2) => b2.type).join(",")}`);
   for (const block of assistantMsg.content) {
     if (block.type === "text" && block.text) {
@@ -38862,21 +38875,7 @@ function processAssistantMessage(message, model, customToolNameToPi) {
       if (block.thinking) c2.currentPiStream?.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: c2.turnOutput });
       c2.currentPiStream?.push({ type: "thinking_end", contentIndex: idx, content: block.thinking ?? "", partial: c2.turnOutput });
     } else if (block.type === "tool_use") {
-      ensureTurnStarted();
-      c2.turnSawToolCall = true;
-      const mappedName = mapToolName(block.name, customToolNameToPi);
-      const mappedArgs = mapToolArgs(mappedName, block.input);
-      c2.recordToolCall(block.id, mappedName, mappedArgs);
-      c2.turnBlocks.push({
-        type: "toolCall",
-        id: block.id,
-        name: mappedName,
-        arguments: mappedArgs
-      });
-      const idx = c2.turnBlocks.length - 1;
-      const toolBlock = c2.turnBlocks[idx];
-      c2.currentPiStream?.push({ type: "toolcall_start", contentIndex: idx, partial: c2.turnOutput });
-      c2.currentPiStream?.push({ type: "toolcall_end", contentIndex: idx, toolCall: toolBlock, partial: c2.turnOutput });
+      if (appendMissingToolUsesFromAssistant({ content: [block] }, model, customToolNameToPi)) c2.turnSawToolCall = true;
     } else if (block.type === "fallback") {
       updateTurnOutputModel(block.to?.model);
     } else {
@@ -38884,12 +38883,7 @@ function processAssistantMessage(message, model, customToolNameToPi) {
     }
   }
   if (assistantMsg.usage && c2.turnOutput) updateUsage(c2.turnOutput, assistantMsg.usage, model);
-  if (c2.turnSawToolCall && c2.currentPiStream && c2.turnOutput) {
-    c2.turnOutput.stopReason = "toolUse";
-    c2.currentPiStream.push({ type: "done", reason: "toolUse", message: c2.turnOutput });
-    c2.currentPiStream.end();
-    c2.currentPiStream = null;
-  }
+  if (c2.turnSawToolCall) finishToolUseStream();
 }
 async function consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConfig, wasAborted) {
   let capturedSessionId;
@@ -38970,10 +38964,10 @@ async function consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConf
             source: "claude-bridge",
             status: "rejected"
           });
-          piUI?.notify(`${RATE_LIMIT_TOKEN} Claude ${reason} hit \u2014 resets ${resetsAt}${launchedExtraUsage ? "; opened /extra-usage helper" : ""}`, "warning");
+          bridgeSession().piUI?.notify(`${RATE_LIMIT_TOKEN} Claude ${reason} hit \u2014 resets ${resetsAt}${launchedExtraUsage ? "; opened /extra-usage helper" : ""}`, "warning");
         } else if (info?.status === "allowed_warning") {
           const warning = formatAllowedRateLimitWarning(info);
-          if (warning) piUI?.notify(warning, "warning");
+          if (warning) bridgeSession().piUI?.notify(warning, "warning");
           else debug("consumeQuery: suppressed low/ambiguous allowed_warning rate_limit_event", JSON.stringify(info).slice(0, 300));
         }
         break;
@@ -38987,11 +38981,13 @@ async function consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConf
   return { capturedSessionId };
 }
 function streamClaudeAgentSdk(model, context, options) {
-  if (!isInTurnContext()) {
-    const routed = runInActiveTurnStore(() => streamClaudeAgentSdk(model, context, options));
-    if (routed.ran) return routed.result;
-    return runWithFreshTurnContext(() => streamClaudeAgentSdk(model, context, options));
-  }
+  return runWithSessionContext(
+    options?.sessionId || options?.signal || context.messages[0],
+    () => streamForSession(model, context, options),
+    true
+  );
+}
+function streamForSession(model, context, options) {
   const stream = newAssistantMessageEventStream();
   const lastMsgRole = context.messages[context.messages.length - 1]?.role;
   const cwd = options?.cwd ?? process.cwd();
@@ -39039,7 +39035,7 @@ function streamClaudeAgentSdk(model, context, options) {
     }
     if (queryCtx.pendingToolCalls.size > 0) {
       debug(`WARNING: ${queryCtx.pendingToolCalls.size} MCP handlers still waiting after delivering ${allResults.length} results`);
-      piUI?.notify(`Claude bridge: ${queryCtx.pendingToolCalls.size} tool handler(s) still waiting \u2014 provider may be stuck`, "warning");
+      bridgeSession().piUI?.notify(`Claude bridge: ${queryCtx.pendingToolCalls.size} tool handler(s) still waiting \u2014 provider may be stuck`, "warning");
     }
     if (lastMsgRole === "user") {
       const userPrompt = extractUserPrompt(context.messages);
@@ -39048,14 +39044,15 @@ function streamClaudeAgentSdk(model, context, options) {
         debug(`provider: deferred user message for replay after query: ${userPrompt.slice(0, 60)}`);
       }
     }
-    if (sharedSession) sharedSession.cursor = context.messages.length;
+    if (bridgeSession().session) bridgeSession().session.cursor = context.messages.length;
     queryCtx.latestCursor = Math.max(queryCtx.latestCursor, context.messages.length);
+    flushPendingToolEmissions();
     return stream;
   }
   const lastMsg = context.messages[context.messages.length - 1];
   if (lastMsg?.role === "toolResult") {
     debug(`provider: orphaned tool result after abort, emitting end_turn`);
-    if (sharedSession) sharedSession.cursor = context.messages.length;
+    if (bridgeSession().session) bridgeSession().session.cursor = context.messages.length;
     const c2 = ctx();
     queueMicrotask(() => {
       c2.resetTurnState(model);
@@ -39064,9 +39061,7 @@ function streamClaudeAgentSdk(model, context, options) {
     });
     return stream;
   }
-  const isReentrant = ctx().activeQuery !== null;
-  if (isReentrant) pushContext();
-  debug(`provider: fresh query setup, isReentrant=${isReentrant}, stackDepth=${stackDepth()}`);
+  debug("provider: fresh query for Pi session", options?.sessionId ?? "anonymous");
   ctx().currentPiStream = stream;
   ctx().pendingToolCalls.clear();
   ctx().pendingResults.clear();
@@ -39074,6 +39069,8 @@ function streamClaudeAgentSdk(model, context, options) {
   ctx().resetTurnState(model);
   ctx().resetToolTracking();
   ctx().latestCursor = 0;
+  ctx().emittedToolCallIds.clear();
+  ctx().pendingToolEmissions.clear();
   const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context);
   const promptBlocks = extractUserPromptBlocks(context.messages);
   let promptText = extractUserPrompt(context.messages) ?? "";
@@ -39081,10 +39078,9 @@ function streamClaudeAgentSdk(model, context, options) {
     diagDump("empty_prompt", {
       contextLength: context.messages.length,
       lastMsgRole: lastMsg?.role,
-      isReentrant,
       stackDepth: stackDepth(),
       activeQueryExists: ctx().activeQuery !== null,
-      sharedSession: sharedSession ? { sessionId: sharedSession.sessionId.slice(0, 8), cursor: sharedSession.cursor } : null,
+      sharedSession: bridgeSession().session ? { sessionId: bridgeSession().session.sessionId.slice(0, 8), cursor: bridgeSession().session.cursor } : null,
       messageRoles: context.messages.map((m4, i) => `[${i}]${m4.role}`).join(" ")
     });
     promptText = "[continue]";
@@ -39147,8 +39143,6 @@ function streamClaudeAgentSdk(model, context, options) {
   let streamIdleTimedOut = false;
   const sdkQuery = jA$({ prompt, options: queryOptions });
   ctx().activeQuery = sdkQuery;
-  const turnStore = currentTurnStore();
-  if (!isReentrant) registerActiveTurnStore(turnStore);
   const abortCtx = ctx();
   const requestAbort = () => {
     void sdkQuery.interrupt().catch(() => {
@@ -39172,7 +39166,7 @@ function streamClaudeAgentSdk(model, context, options) {
       streamIdleTimedOut = true;
       abortCtx.deferredUserMessages = [];
       abortCtx.handledTerminalError = true;
-      if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+      if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
       const errorMessage = buildStreamIdleTimeoutErrorMessage(timeoutMs);
       debug("provider: stream idle timeout", `model=${model.id}`, `timeout=${timeoutMs}`, `idle=${idleMs}`);
       emitRateLimitEvent({
@@ -39186,7 +39180,7 @@ function streamClaudeAgentSdk(model, context, options) {
         status: "rejected",
         timeoutMs
       });
-      piUI?.notify(`${RATE_LIMIT_TOKEN} Claude stream idle timeout after ${formatDurationShort(timeoutMs)} \u2014 retrying via rate-limit backoff`, "warning");
+      bridgeSession().piUI?.notify(`${RATE_LIMIT_TOKEN} Claude stream idle timeout after ${formatDurationShort(timeoutMs)} \u2014 retrying via rate-limit backoff`, "warning");
       if (abortCtx.turnOutput) {
         abortCtx.turnOutput.stopReason = "error";
         abortCtx.turnOutput.errorMessage = errorMessage;
@@ -39216,6 +39210,7 @@ function streamClaudeAgentSdk(model, context, options) {
     }
     abortCtx.pendingToolCalls.clear();
     abortCtx.pendingResults.clear();
+    abortCtx.pendingToolEmissions.clear();
     requestAbort();
   };
   if (options?.signal) {
@@ -39230,9 +39225,9 @@ function streamClaudeAgentSdk(model, context, options) {
       return;
     }
     if (wasAborted || options?.signal?.aborted) {
-      if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+      if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
       ctx().deferredUserMessages = [];
-      debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
+      debug(`provider: abort detected, marked bridgeSession().session needsRebuild + forceRotate`);
       if (ctx().turnOutput) {
         ctx().turnOutput.stopReason = "aborted";
         ctx().turnOutput.errorMessage = "Operation aborted";
@@ -39242,19 +39237,19 @@ function streamClaudeAgentSdk(model, context, options) {
       ctx().currentPiStream = null;
       return;
     }
-    const sessionId = capturedSessionId ?? sharedSession?.sessionId;
+    const sessionId = capturedSessionId ?? bridgeSession().session?.sessionId;
     if (sessionId) {
-      const cursor = Math.max(context.messages.length, ctx().latestCursor, sharedSession?.cursor ?? 0);
+      const cursor = Math.max(context.messages.length, ctx().latestCursor, bridgeSession().session?.cursor ?? 0);
       debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
-      sharedSession = { sessionId, cursor, cwd };
+      bridgeSession().session = { sessionId, cursor, cwd };
     }
     try {
-      while (ctx().deferredUserMessages.length > 0 && !isReentrant && !wasAborted) {
+      while (ctx().deferredUserMessages.length > 0 && !wasAborted) {
         const steerPrompt = ctx().deferredUserMessages.shift();
         debug(`provider: replaying deferred user message: ${steerPrompt.slice(0, 60)}`);
         ctx().resetTurnState(model);
         ctx().resetToolTracking();
-        const resumeId = sharedSession?.sessionId;
+        const resumeId = bridgeSession().session?.sessionId;
         if (!resumeId) {
           debug(`WARNING: no session to resume for deferred message, dropping`);
           break;
@@ -39265,9 +39260,9 @@ function streamClaudeAgentSdk(model, context, options) {
         debug(`provider: continuation query, model=${model.id}, resume=${resumeId.slice(0, 8)}, prompt=${steerPrompt.slice(0, 60)}`);
         try {
           const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted);
-          const sid = contSid ?? sharedSession?.sessionId;
+          const sid = contSid ?? bridgeSession().session?.sessionId;
           if (sid) {
-            sharedSession = { sessionId: sid, cursor: sharedSession?.cursor ?? 0, cwd };
+            bridgeSession().session = { sessionId: sid, cursor: bridgeSession().session?.cursor ?? 0, cwd };
           }
         } catch (contError) {
           debug(`provider: continuation query error:`, contError);
@@ -39279,15 +39274,17 @@ function streamClaudeAgentSdk(model, context, options) {
     } finally {
       ctx().activeQuery = sdkQuery;
     }
+    reportToolResultMismatch(ctx(), "query completion", cwd);
+    ctx().activeQuery = null;
     finalizeCurrentStream(ctx().turnOutput?.stopReason);
   }).catch((error51) => {
     debug(`provider: query error, model=${model.id}, aborted=${Boolean(options?.signal?.aborted)}, error=`, error51);
     const suppressDuplicateError = ctx().handledTerminalError || streamIdleTimedOut;
     const openedExtraUsage = !suppressDuplicateError && isExtraUsageRequiredMessage(error51) && launchExtraUsageHelperIfAllowed(cwd, bridgeConfig, "query error");
-    if ((wasAborted || options?.signal?.aborted) && sharedSession) {
-      sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+    if ((wasAborted || options?.signal?.aborted) && bridgeSession().session) {
+      bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
     } else {
-      sharedSession = null;
+      bridgeSession().session = null;
     }
     ctx().deferredUserMessages = [];
     if (suppressDuplicateError) {
@@ -39302,22 +39299,18 @@ function streamClaudeAgentSdk(model, context, options) {
     ctx().currentPiStream?.end();
     ctx().currentPiStream = null;
   }).finally(() => {
-    if (!isReentrant) unregisterActiveTurnStore(turnStore);
     streamIdleWatchdog?.dispose();
     activeStreamIdleWatchdogs.delete(abortCtx);
     if (options?.signal) options.signal.removeEventListener("abort", onAbort);
-    if (ctx().activeQuery === sdkQuery) {
+    if (ctx().activeQuery === sdkQuery || ctx().activeQuery === null) {
       reportToolResultMismatch(ctx(), "query teardown", cwd, { forceRotate: wasAborted || options?.signal?.aborted || streamIdleTimedOut });
       for (const pending of ctx().pendingToolCalls.values()) {
         pending.resolve({ content: [{ type: "text", text: "Query ended" }] });
       }
       ctx().pendingToolCalls.clear();
       ctx().pendingResults.clear();
-      if (isReentrant) {
-        popContext();
-      } else {
-        ctx().activeQuery = null;
-      }
+      ctx().pendingToolEmissions.clear();
+      ctx().activeQuery = null;
     }
     sdkQuery.close();
   });
@@ -39383,7 +39376,15 @@ function registerBridgeCommands(pi) {
   });
 }
 function index_default(pi) {
-  extensionApi = pi;
+  let registeredHere = false;
+  const on = (name, handler) => pi.on(name, (event, host) => {
+    const id = host.sessionManager.getSessionId();
+    return runWithSessionContext(id, () => {
+      bridgeSession().extensionApi = pi;
+      bridgeSession().piUI = host.ui;
+      return handler(event, host);
+    });
+  });
   process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
   const config2 = loadConfig(process.cwd());
   debug("loadConfig:", JSON.stringify(config2));
@@ -39393,40 +39394,44 @@ function index_default(pi) {
     return;
   }
   const clearSession = (event) => {
-    debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
-    sharedSession = null;
+    debug(`${event}: clearing session ${bridgeSession().session?.sessionId?.slice(0, 8) ?? "none"}`);
+    bridgeSession().session = null;
     const g10 = globalThis;
-    if (g10[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
+    if (registeredHere && g10[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
       debug(`${event}: clearing ACTIVE_STREAM_SIMPLE_KEY`);
       g10[ACTIVE_STREAM_SIMPLE_KEY] = void 0;
     }
   };
-  pi.on("session_start", (event, ctx2) => {
+  on("session_start", (event, ctx2) => {
     recordProjectTrust(ctx2);
-    piUI = ctx2.ui;
+    bridgeSession().piUI = ctx2.ui;
     if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
       clearSession(`session_start:${event.reason}`);
     }
     if (event.reason === "startup" || event.reason === "resume") restoreSharedSessionFromPi(ctx2);
   });
-  pi.on("session_shutdown", () => clearSession("session_shutdown"));
-  pi.on("message_end", (event, ctx2) => {
+  on("session_shutdown", (_event, host) => {
+    clearSession("session_shutdown");
+    forgetSessionContext(host.sessionManager.getSessionId());
+  });
+  on("message_end", (event, ctx2) => {
     const message = event.message;
     if (message?.role === "assistant" && message.provider === PROVIDER_ID) schedulePersistSharedSession(ctx2);
   });
   const markRebuild = (event) => {
     if (ctx().activeQuery) {
-      reportToolResultMismatch(ctx(), event, sharedSession?.cwd ?? process.cwd());
+      reportToolResultMismatch(ctx(), event, bridgeSession().session?.cwd ?? process.cwd());
     }
-    if (sharedSession) {
-      debug(`${event}: marking needsRebuild on session ${sharedSession.sessionId.slice(0, 8)}`);
-      sharedSession = { ...sharedSession, needsRebuild: true };
+    if (bridgeSession().session) {
+      debug(`${event}: marking needsRebuild on session ${bridgeSession().session.sessionId.slice(0, 8)}`);
+      bridgeSession().session = { ...bridgeSession().session, needsRebuild: true };
     }
   };
-  pi.on("session_compact", () => markRebuild("session_compact"));
-  pi.on("session_tree", () => markRebuild("session_tree"));
+  on("session_compact", () => markRebuild("session_compact"));
+  on("session_tree", () => markRebuild("session_tree"));
   const g2 = globalThis;
   if (!g2[ACTIVE_STREAM_SIMPLE_KEY]) {
+    registeredHere = true;
     g2[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
     pi.registerProvider(PROVIDER_ID, {
       baseUrl: "claude-bridge",
@@ -39454,6 +39459,7 @@ export {
   classifyClaudeExecutableBytes,
   createStreamIdleWatchdog,
   index_default as default,
+  flushPendingToolEmissions,
   formatAllowedRateLimitWarning,
   formatResetTimestamp,
   isExtraUsageRequiredMessage,
@@ -39467,6 +39473,7 @@ export {
   restoreSharedSessionFromPi,
   shouldRestorePersistedBridgeEntry,
   spawnClaudeCodeWithDiagnostics,
+  streamClaudeAgentSdk,
   streamIdleTimeoutMsFromEnv,
   uniqueNonEmptyLines,
   wrapClaudeSpawnErrorForSdk

@@ -1,6 +1,6 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { processAssistantMessage, processStreamEvent } from "../src/index.ts";
+import { processAssistantMessage, processStreamEvent, flushPendingToolEmissions } from "../src/index.ts";
 import { ctx, resetStack } from "../src/query-state.ts";
 
 const model = {
@@ -88,13 +88,14 @@ describe("assistant tool-use boundary fallback", () => {
 		assert.deepEqual(events.map((event) => event.type), ["start", "toolcall_start", "toolcall_end", "done", "stream_end"]);
 	});
 
-	it("records assistant tool-use ids even after the stream already ended", () => {
+	it("queues late tool-use ids without mutating the output Pi already consumed", () => {
 		const c = ctx();
 		c.resetTurnState(model);
 		c.turnSawStreamEvent = true;
 		c.turnSawToolCall = true;
 		c.currentPiStream = null;
 		c.recordToolCall("toolu_streamed", "bash", { command: "echo first", timeout: 120 });
+    c.emittedToolCallIds.add("toolu_streamed");
 		c.turnBlocks.push({
 			type: "toolCall",
 			id: "toolu_streamed",
@@ -127,9 +128,18 @@ describe("assistant tool-use boundary fallback", () => {
 
 		assert.equal(c.currentPiStream, null);
 		assert.deepEqual(c.turnToolCallIds, ["toolu_streamed", "toolu_missing_after_stop"]);
-		assert.equal(c.turnBlocks.length, 2);
-		assert.equal(c.turnBlocks[1].name, "write");
-		assert.equal(c.turnBlocks[1].arguments.path, "out.txt");
+    assert.equal(c.turnBlocks.length, 1, "closed output must not change");
+    c.resetTurnState(model);
+    const events = installFakeStream();
+    flushPendingToolEmissions();
+    assert.deepEqual(c.turnBlocks.map(b => b.id), ["toolu_missing_after_stop"]);
+    assert.equal(c.turnBlocks[0].arguments.path, "out.txt");
+    assert.equal(events.at(-2).reason, "toolUse");
+    assert.equal(c.pendingToolEmissions.size, 0);
+    c.resetTurnState(model);
+    const next = installFakeStream();
+    flushPendingToolEmissions();
+    assert.equal(next.length, 0, "late calls must not execute twice");
 	});
 
 	it("ignores a late bare message_stop so the next assistant fallback still renders text", () => {

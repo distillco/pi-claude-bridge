@@ -15,7 +15,7 @@ import { FABLE_FALLBACK_MODEL_ID, FABLE_MODEL_ID, buildModels, fallbackModelForP
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, extractSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
-import { QueryContext, ctx, stackDepth, pushContext, popContext, runWithFreshTurnContext, isInTurnContext, currentTurnStore, registerActiveTurnStore, unregisterActiveTurnStore, runInActiveTurnStore } from "./query-state.js";
+import { QueryContext, ctx, stackDepth, runWithSessionContext, forgetSessionContext, type SessionState } from "./query-state.js";
 import { findUnpairedToolUses, summarizeMissingToolNames, type MissingToolResult } from "./tool-pairing-audit.js";
 import { loadConfig, normalizeEffortLevel, recordProjectTrust, type Config } from "./config.js";
 import { extractAgentsAppend } from "./agents-md.js";
@@ -362,7 +362,7 @@ function diagDump(label: string, data: Record<string, unknown>) {
 }
 
 function safeNotify(message: string, level: "info" | "warning" | "error" = "warning"): void {
-	try { piUI?.notify(message, level); }
+	try { bridgeSession().piUI?.notify(message, level); }
 	catch (error) { debug("notify failed:", error); }
 }
 
@@ -413,8 +413,8 @@ export function reportToolResultMismatch(queryCtx: QueryContext, reason: string,
 			: progress.waitingCount > 0 || progress.queuedCount > 0 || progress.unmatchedResultCount > 0;
 		if (!hasMismatch) return false;
 		queryCtx.reportedToolResultMismatch = true;
-		if (sharedSession) {
-			sharedSession = { ...sharedSession, needsRebuild: true, ...(opts.forceRotate ? { forceRotate: true } : {}) };
+		if (bridgeSession().session) {
+			bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, ...(opts.forceRotate ? { forceRotate: true } : {}) };
 		}
 		const toolNameSummary = compactToolNameSummary(progress.toolNames);
 		diagDump("tool_result_delivery_mismatch", {
@@ -422,11 +422,11 @@ export function reportToolResultMismatch(queryCtx: QueryContext, reason: string,
 			cwd,
 			progress,
 			activeQueryExists: queryCtx.activeQuery !== null,
-			sharedSession: sharedSession ? {
-				sessionId: sharedSession.sessionId.slice(0, 8),
-				cursor: sharedSession.cursor,
-				needsRebuild: sharedSession.needsRebuild === true,
-				forceRotate: sharedSession.forceRotate === true,
+			sharedSession: bridgeSession().session ? {
+				sessionId: bridgeSession().session.sessionId.slice(0, 8),
+				cursor: bridgeSession().session.cursor,
+				needsRebuild: bridgeSession().session.needsRebuild === true,
+				forceRotate: bridgeSession().session.forceRotate === true,
 			} : null,
 		});
 		safeNotify(
@@ -445,16 +445,16 @@ export function reportToolResultMismatch(queryCtx: QueryContext, reason: string,
 }
 
 export function __testSetBridgeIntegrityState(state: { ui?: Pick<ExtensionUIContext, "notify"> | null; sharedSession?: SessionState | null }): void {
-	if ("ui" in state) piUI = state.ui as ExtensionUIContext | undefined;
-	if ("sharedSession" in state) sharedSession = state.sharedSession ?? null;
+	if ("ui" in state) bridgeSession().piUI = state.ui as ExtensionUIContext | undefined;
+	if ("sharedSession" in state) bridgeSession().session = state.sharedSession ?? null;
 }
 
 export function __testGetBridgeIntegrityState(): { sharedSession: SessionState | null } {
-	return { sharedSession };
+	return { sharedSession: bridgeSession().session };
 }
 
 /** Test hook: run the private session-sync state machine against the current
- * (test-seeded) sharedSession. */
+ * (test-seeded) session pointer. */
 export function __testSyncSharedSession(messages: Context["messages"], cwd: string): SyncResult {
 	return syncSharedSession(messages, cwd);
 }
@@ -512,29 +512,9 @@ export const CLAUDE_BRIDGE_TOOL_ISOLATION = {
 
 // --- Session persistence ---
 
-interface SessionState {
-	sessionId: string;
-	cursor: number;
-	cwd: string;
-	// Force the next syncSharedSession call down the REBUILD path. Set when
-	// pi has mutated its messages array out from under us (compact, tree
-	// navigation) or after an abort left the JSONL in an indeterminate state.
-	// REBUILD wipes and rewrites the file to match pi's current history.
-	needsRebuild?: boolean;
-	// Set ONLY after an abort. The killed CC subprocess may still be flushing
-	// a late "[Request interrupted by user]" record to the session JSONL.
-	// Reusing the same sessionId/path would race that orphan write into our
-	// fresh file and break CC's parent-uuid chain on the next resume. When
-	// this flag is set, REBUILD takes a fresh UUID and skips deleteSession
-	// so the orphan writes land on a dead inode. Compact/tree do NOT set
-	// this — there's no concurrent CC writer during those events, so
-	// in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
-	forceRotate?: boolean;
-}
+// These accessors follow the current Pi session's ALS store, not the process cwd.
+function bridgeSession(): QueryContext { return ctx(); }
 
-let sharedSession: SessionState | null = null;
-let extensionApi: ExtensionAPI | undefined;
-let piUI: ExtensionUIContext | undefined;
 let extraUsageHelperInFlight: Promise<string> | null = null;
 
 const RATE_LIMIT_AUTO_RESUME_EVENT = "vstack:rate-limit";
@@ -734,7 +714,7 @@ export function formatAllowedRateLimitWarning(info: { status?: unknown; utilizat
 
 function emitRateLimitEvent(payload: Record<string, unknown>): void {
 	try {
-		extensionApi?.events?.emit?.(RATE_LIMIT_AUTO_RESUME_EVENT, payload);
+		bridgeSession().extensionApi?.events?.emit?.(RATE_LIMIT_AUTO_RESUME_EVENT, payload);
 	} catch {
 		// Cross-extension broker is best-effort only.
 	}
@@ -790,12 +770,12 @@ function launchExtraUsageHelperIfAllowed(cwd: string, config: Config, reason: st
 	if (extraUsageHelperInFlight) return true;
 	extraUsageHelperInFlight = runExtraUsageHelper(cwd, config)
 		.then((message) => {
-			piUI?.notify(`Claude extra usage helper: ${message}`, "info");
+			bridgeSession().piUI?.notify(`Claude extra usage helper: ${message}`, "info");
 			return message;
 		})
 		.catch((error) => {
 			const message = error instanceof Error ? error.message : String(error);
-			piUI?.notify(`Claude extra usage helper failed after ${reason}: ${message}`, "error");
+			bridgeSession().piUI?.notify(`Claude extra usage helper failed after ${reason}: ${message}`, "error");
 			throw error;
 		})
 		.finally(() => { extraUsageHelperInFlight = null; });
@@ -907,13 +887,14 @@ export function restoreSharedSessionFromPi(ctx: { sessionManager?: unknown; cwd?
 		debug(`restoreSharedSession: Claude session missing for ${persisted.sessionId.slice(0, 8)}`);
 		return;
 	}
-	sharedSession = { sessionId: persisted.sessionId, cursor, cwd: persisted.cwd };
+	bridgeSession().session = { sessionId: persisted.sessionId, cursor, cwd: persisted.cwd };
 	debug(`restoreSharedSession: restored ${persisted.sessionId.slice(0, 8)}, cursor=${cursor}`);
 }
 
 function schedulePersistSharedSession(ctxLike?: { sessionManager?: unknown }): void {
-	if (!extensionApi || !sharedSession || !ctxLike?.sessionManager) return;
-	const snapshot = { ...sharedSession };
+	if (!bridgeSession().extensionApi || !bridgeSession().session || !ctxLike?.sessionManager) return;
+	const snapshot = { ...bridgeSession().session };
+  const api = bridgeSession().extensionApi;
 	const timer = setTimeout(() => {
 		try {
 			const built = readBuiltSessionContext(ctxLike.sessionManager);
@@ -926,7 +907,7 @@ function schedulePersistSharedSession(ctxLike?: { sessionManager?: unknown }): v
 				piSessionId: typeof (ctxLike.sessionManager as any)?.getSessionId === "function" ? (ctxLike.sessionManager as any).getSessionId() : undefined,
 				updatedAt: new Date().toISOString(),
 			};
-			extensionApi?.appendEntry(BRIDGE_SESSION_CUSTOM_TYPE, data);
+			api.appendEntry(BRIDGE_SESSION_CUSTOM_TYPE, data);
 			debug(`persistSharedSession: saved ${data.sessionId.slice(0, 8)}, cursor=${data.cursor}`);
 		} catch (error) {
 			debug("persistSharedSession failed:", error);
@@ -1053,7 +1034,7 @@ interface SyncResult {
 // Read the session file we just wrote and sanity-check it. Warns instead of
 // throwing — CC may be more tolerant than our checks, so a false positive
 // shouldn't block the user. Pure logic is in session-verify.js; this wrapper
-// fans each warning out to debug log + piUI notify + diagDump.
+// fans each warning out to debug log + bridgeSession().piUI notify + diagDump.
 function verifyWrittenSession(
 	jsonlPath: string,
 	expectedSessionId: string,
@@ -1063,7 +1044,7 @@ function verifyWrittenSession(
 	const warnings = _verifyWrittenSession(jsonlPath, expectedSessionId, expectedRecordCount);
 	for (const msg of warnings) {
 		debug(`WARNING session verify: ${msg}`);
-		piUI?.notify(
+		bridgeSession().piUI?.notify(
 			`Session file issue: ${msg}\n` +
 			`cwd=${cwd} realpath=${safeRealpath(cwd)} CLAUDE_CONFIG_DIR=${process.env.CLAUDE_CONFIG_DIR ?? "(unset)"}\n` +
 			`Please copy and paste this message into a new issue at https://github.com/elidickinson/pi-claude-bridge/issues/new` +
@@ -1098,7 +1079,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 }
 
 // Two semantic paths:
-//   REUSE — pi's history is in sync with the existing sharedSession (or drifted
+//   REUSE — pi's history is in sync with the existing bridgeSession().session (or drifted
 //     only by the trailing final-assistant message that pi appends after
 //     streamSimple returns, which CC's own persisted session already has).
 //     Returns the existing sessionId. Keeps CC's prompt cache warm.
@@ -1135,9 +1116,9 @@ function syncSharedSession(
 	// turn). The stored pointer belongs to the other task's conversation, so
 	// REUSE must be skipped and the rebuild must not touch (or reuse the UUID
 	// of) the other task's session file — same treatment as forceRotate.
-	const cwdChanged = sharedSession !== null && canonicalize(sharedSession.cwd) !== canonicalize(cwd);
+	const cwdChanged = bridgeSession().session !== null && canonicalize(bridgeSession().session.cwd) !== canonicalize(cwd);
 	if (cwdChanged) {
-		debug(`syncSharedSession: cwd changed (${sharedSession!.cwd} → ${cwd}) — foreign session pointer, rotating`);
+		debug(`syncSharedSession: cwd changed (${bridgeSession().session!.cwd} → ${cwd}) — foreign session pointer, rotating`);
 	}
 
 	// REUSE path. Also requires cursor ≤ priors: a brand-new pi session's
@@ -1148,17 +1129,17 @@ function syncSharedSession(
 	// history (compact / tree-nav) is already flagged via needsRebuild events,
 	// but when pi's history is shorter than the cursor for ANY reason, REBUILD
 	// from pi's current history is the only answer that can't leak.
-	if (sharedSession && !sharedSession.needsRebuild && !cwdChanged && priorMessages.length >= sharedSession.cursor) {
-		const missed = priorMessages.slice(sharedSession.cursor);
+	if (bridgeSession().session && !bridgeSession().session.needsRebuild && !cwdChanged && priorMessages.length >= bridgeSession().session.cursor) {
+		const missed = priorMessages.slice(bridgeSession().session.cursor);
 		const trailingAssistantOnly =
 			missed.length === 1 && (missed[0] as { role?: string }).role === "assistant";
 		if (missed.length === 0 || trailingAssistantOnly) {
 			if (trailingAssistantOnly) {
-				sharedSession = { ...sharedSession, cursor: priorMessages.length, cwd };
+				bridgeSession().session = { ...bridgeSession().session, cursor: priorMessages.length, cwd };
 			}
-			debug(`Case 3: ${trailingAssistantOnly ? "advanced cursor past trailing assistant, " : ""}resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
-			debug(`syncResult: path=reuse sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
-			return { sessionId: sharedSession.sessionId };
+			debug(`Case 3: ${trailingAssistantOnly ? "advanced cursor past trailing assistant, " : ""}resuming session ${bridgeSession().session.sessionId.slice(0, 8)}, cursor=${bridgeSession().session.cursor}`);
+			debug(`syncResult: path=reuse sessionId=${bridgeSession().session.sessionId} cursor=${bridgeSession().session.cursor}`);
+			return { sessionId: bridgeSession().session.sessionId };
 		}
 	}
 
@@ -1168,14 +1149,14 @@ function syncSharedSession(
 		debug(`syncResult: path=clean-start`);
 		return { sessionId: null };
 	}
-	const previousSessionId = sharedSession?.sessionId;
-	const previousCursor = sharedSession?.cursor ?? 0;
+	const previousSessionId = bridgeSession().session?.sessionId;
+	const previousCursor = bridgeSession().session?.cursor ?? 0;
 	// preserveId: rebuild in place (deleteSession + createSession with the
 	// existing UUID), so prompt-cache UUIDs stay stable for log correlation
 	// and for any tools that key off them. Skipped when there's a concurrent
 	// writer we shouldn't race (see forceRotate docs above) and when the
 	// pointer belongs to another cwd's task — its file must stay untouched.
-	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate && !cwdChanged;
+	const preserveId = previousSessionId !== undefined && !bridgeSession().session?.forceRotate && !cwdChanged;
 	if (preserveId) {
 		// Wipe prior jsonl + companion dir (no-op if nothing to wipe).
 		deleteSession(previousSessionId!, cwd, process.env.CLAUDE_CONFIG_DIR);
@@ -1189,7 +1170,7 @@ function syncSharedSession(
 	convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd);
 	session.save();
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.messages.length, cwd);
-	sharedSession = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
+	bridgeSession().session = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
 	if (previousSessionId === undefined) {
 		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.messages.length} records`);
 	} else if (preserveId) {
@@ -1451,13 +1432,13 @@ export function processStreamEvent(
 	}
 
 	if (event?.type === "message_start") {
-		c.resetToolTracking();
 		updateTurnOutputModel(event.message?.model);
 		if (event.message?.usage) updateUsage(c.turnOutput, event.message.usage, model);
 		return;
 	}
 
 	if (event?.type === "content_block_start") {
+    if (event.content_block?.type === "tool_use" && c.emittedToolCallIds.has(event.content_block.id)) return;
 		c.turnSawStreamEvent = true;
 		ensureTurnStarted();
 		if (event.content_block?.type === "text") {
@@ -1545,10 +1526,7 @@ export function processStreamEvent(
 		// assistant message for this turn, but currentPiStream=null causes
 		// consumeQuery to skip it. The MCP handler blocks the generator until
 		// pi delivers the tool result via the next streamSimple call.
-		c.turnOutput.stopReason = "toolUse";
-		c.currentPiStream!.push({ type: "done", reason: "toolUse", message: c.turnOutput });
-		c.currentPiStream!.end();
-		c.currentPiStream = null;
+		finishToolUseStream();
 
 		// Cursor is updated by the next streamSimple call (tool result delivery path)
 		// which sets cursor = context.messages.length with the post-tool-result context.
@@ -1558,6 +1536,39 @@ export function processStreamEvent(
 	if (event?.type !== "message_stop" && event?.type !== "ping") {
 		debug("processStreamEvent: unhandled event type", event?.type);
 	}
+}
+
+/** Close a Pi output only after recording exactly which tools it can execute.
+ * Later SDK messages must not mutate this already-consumed output. */
+function finishToolUseStream(): void {
+  const c = ctx();
+  if (!c.currentPiStream || !c.turnOutput) return;
+  for (const block of c.turnBlocks) {
+    if (block.type === "toolCall") c.emittedToolCallIds.add(block.id);
+  }
+  c.turnOutput.stopReason = "toolUse";
+  c.currentPiStream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
+  c.currentPiStream.end();
+  c.currentPiStream = null;
+}
+
+/** Pi supplies a new stream when it returns the preceding tool results. Deliver
+ * any calls that arrived after the previous output had already been consumed. */
+export function flushPendingToolEmissions(): void {
+  const c = ctx();
+  if (!c.currentPiStream || !c.pendingToolEmissions.size) return;
+  for (const call of c.pendingToolEmissions.values()) {
+    if (c.emittedToolCallIds.has(call.id)) continue;
+    ensureTurnStarted();
+    const block = { type: "toolCall" as const, id: call.id, name: call.toolName, arguments: call.arguments };
+    c.turnBlocks.push(block);
+    const contentIndex = c.turnBlocks.length - 1;
+    c.currentPiStream.push({ type: "toolcall_start", contentIndex, partial: c.turnOutput });
+    c.currentPiStream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: c.turnOutput });
+    c.turnSawToolCall = true;
+  }
+  c.pendingToolEmissions.clear();
+  if (c.turnSawToolCall) finishToolUseStream();
 }
 
 // The SDK always yields `assistant` messages (completed content blocks) after streaming.
@@ -1575,12 +1586,16 @@ function appendMissingToolUsesFromAssistant(
 	if (!assistantMsg?.content) return false;
 	let sawToolUse = false;
 	for (const block of assistantMsg.content) {
-		if (block.type !== "tool_use") continue;
-		sawToolUse = true;
+		if (block.type !== "tool_use" || c.emittedToolCallIds.has(block.id)) continue;
 		const existingIdx = c.turnBlocks.findIndex((b: any) => b.type === "toolCall" && b.id === block.id);
 		const name = mapToolName(block.name, customToolNameToPi);
 		const mappedArgs = mapToolArgs(name, block.input);
 		c.recordToolCall(block.id, name, mappedArgs);
+    if (!c.currentPiStream) {
+      c.pendingToolEmissions.set(block.id, { id: block.id, toolName: name, arguments: mappedArgs });
+      continue;
+    }
+    sawToolUse = true;
 		if (existingIdx >= 0) {
 			const existing = c.turnBlocks[existingIdx] as any;
 			existing.name = name;
@@ -1613,6 +1628,10 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
 	const c = ctx();
 	const assistantMsg = (message as any).message;
 	if (!assistantMsg?.content) return;
+  if (!c.currentPiStream) {
+    appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi);
+    return;
+  }
 	updateTurnOutputModel(assistantMsg.model);
 	if (c.turnSawStreamEvent) {
 		// Claude Agent SDK can yield the completed assistant message before (or
@@ -1623,17 +1642,10 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
 		// results and Pi only sees the real outputs one render cycle later.
 		if (appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi)) {
 			c.turnSawToolCall = true;
-			if (c.currentPiStream && c.turnOutput) {
-				c.turnOutput.stopReason = "toolUse";
-				c.currentPiStream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
-				c.currentPiStream.end();
-				c.currentPiStream = null;
-				debug("processAssistantMessage boundary: ended streamed tool_use turn from assistant message");
-			}
+      finishToolUseStream();
 		}
 		return;
 	}
-	c.resetToolTracking();
 	debug(`processAssistantMessage fallback: ${assistantMsg.content.length} blocks, types=${assistantMsg.content.map((b: any) => b.type).join(",")}`);
 	for (const block of assistantMsg.content) {
 		if (block.type === "text" && block.text) {
@@ -1651,20 +1663,7 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
 			if (block.thinking) c.currentPiStream?.push({ type: "thinking_delta", contentIndex: idx, delta: block.thinking, partial: c.turnOutput });
 			c.currentPiStream?.push({ type: "thinking_end", contentIndex: idx, content: block.thinking ?? "", partial: c.turnOutput });
 		} else if (block.type === "tool_use") {
-			ensureTurnStarted();
-			c.turnSawToolCall = true;
-			const mappedName = mapToolName(block.name, customToolNameToPi);
-			const mappedArgs = mapToolArgs(mappedName, block.input);
-			c.recordToolCall(block.id, mappedName, mappedArgs);
-			c.turnBlocks.push({
-				type: "toolCall", id: block.id,
-				name: mappedName,
-				arguments: mappedArgs,
-			});
-			const idx = c.turnBlocks.length - 1;
-			const toolBlock = c.turnBlocks[idx];
-			c.currentPiStream?.push({ type: "toolcall_start", contentIndex: idx, partial: c.turnOutput });
-			c.currentPiStream?.push({ type: "toolcall_end", contentIndex: idx, toolCall: toolBlock as any, partial: c.turnOutput });
+      if (appendMissingToolUsesFromAssistant({ content: [block] }, model, customToolNameToPi)) c.turnSawToolCall = true;
 		} else if (block.type === "fallback") {
 			updateTurnOutputModel(block.to?.model);
 		} else {
@@ -1674,12 +1673,7 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
 	if (assistantMsg.usage && c.turnOutput) updateUsage(c.turnOutput, assistantMsg.usage, model);
 
 	// End the stream on tool_use, same as processStreamEvent's message_stop handler.
-	if (c.turnSawToolCall && c.currentPiStream && c.turnOutput) {
-		c.turnOutput.stopReason = "toolUse";
-		c.currentPiStream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
-		c.currentPiStream.end();
-		c.currentPiStream = null;
-	}
+	if (c.turnSawToolCall) finishToolUseStream();
 }
 
 /** Background consumer: iterates the SDK generator, pushing events to currentPiStream.
@@ -1780,10 +1774,10 @@ async function consumeQuery(
 						source: "claude-bridge",
 						status: "rejected",
 					});
-					piUI?.notify(`${RATE_LIMIT_TOKEN} Claude ${reason} hit — resets ${resetsAt}${launchedExtraUsage ? "; opened /extra-usage helper" : ""}`, "warning");
+					bridgeSession().piUI?.notify(`${RATE_LIMIT_TOKEN} Claude ${reason} hit — resets ${resetsAt}${launchedExtraUsage ? "; opened /extra-usage helper" : ""}`, "warning");
 				} else if (info?.status === "allowed_warning") {
 					const warning = formatAllowedRateLimitWarning(info);
-					if (warning) piUI?.notify(warning, "warning");
+					if (warning) bridgeSession().piUI?.notify(warning, "warning");
 					else debug("consumeQuery: suppressed low/ambiguous allowed_warning rate_limit_event", JSON.stringify(info).slice(0, 300));
 				}
 				break;
@@ -1802,22 +1796,12 @@ async function consumeQuery(
 
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
-function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	// Concurrent-task isolation: each top-level turn runs in its own
-	// AsyncLocalStorage slot so concurrent tasks don't share _ctx/contextStack.
-	// Reentrant subagent calls are already inside a slot and skip this.
-	if (!isInTurnContext()) {
-		// Pi calls the provider from ITS OWN async chain, so the follow-up calls
-		// of an in-flight query (tool-result delivery, steer/followUp) arrive
-		// OUTSIDE the slot created for the query's first call. Rejoin the single
-		// active turn's slot when one exists; a fresh slot here would make the
-		// in-flight query invisible (activeQuery=null) and every tool result
-		// "orphaned" — ending the turn empty while the CLI waits forever.
-		const routed = runInActiveTurnStore(() => streamClaudeAgentSdk(model, context, options));
-		if (routed.ran) return routed.result;
-		return runWithFreshTurnContext(() => streamClaudeAgentSdk(model, context, options));
-	}
+export function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+  return runWithSessionContext(options?.sessionId || options?.signal || context.messages[0],
+    () => streamForSession(model, context, options), true);
+}
 
+function streamForSession(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	const stream = newAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering
@@ -1872,7 +1856,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		}
 		if (queryCtx.pendingToolCalls.size > 0) {
 			debug(`WARNING: ${queryCtx.pendingToolCalls.size} MCP handlers still waiting after delivering ${allResults.length} results`);
-			piUI?.notify(`Claude bridge: ${queryCtx.pendingToolCalls.size} tool handler(s) still waiting — provider may be stuck`, "warning");
+			bridgeSession().piUI?.notify(`Claude bridge: ${queryCtx.pendingToolCalls.size} tool handler(s) still waiting — provider may be stuck`, "warning");
 		}
 
 		// Detect user messages (steer/followUp) that pi injected into context
@@ -1891,8 +1875,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			}
 		}
 
-		if (sharedSession) sharedSession.cursor = context.messages.length;
+		if (bridgeSession().session) bridgeSession().session.cursor = context.messages.length;
 		queryCtx.latestCursor = Math.max(queryCtx.latestCursor, context.messages.length);
+    flushPendingToolEmissions();
 		return stream;
 	}
 
@@ -1902,7 +1887,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const lastMsg = context.messages[context.messages.length - 1];
 	if (lastMsg?.role === "toolResult") {
 		debug(`provider: orphaned tool result after abort, emitting end_turn`);
-		if (sharedSession) sharedSession.cursor = context.messages.length;
+		if (bridgeSession().session) bridgeSession().session.cursor = context.messages.length;
 		const c = ctx();  // capture current context for the microtask
 		queueMicrotask(() => {
 			c.resetTurnState(model);
@@ -1914,10 +1899,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	// --- Fresh query ---
 
-	// 1. Determine reentrancy and push parent context if needed.
-	const isReentrant = ctx().activeQuery !== null;
-	if (isReentrant) pushContext();
-	debug(`provider: fresh query setup, isReentrant=${isReentrant}, stackDepth=${stackDepth()}`);
+	// Nested agents already entered their own store at the provider entry point.
+	debug("provider: fresh query for Pi session", options?.sessionId ?? "anonymous");
 
 	// 2. Fresh child context — constructor already gave us clean Maps and empty
 	//    arrays. For a reused top-level context, clear explicitly.
@@ -1928,6 +1911,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	ctx().resetTurnState(model);
 	ctx().resetToolTracking();
 	ctx().latestCursor = 0;
+  ctx().emittedToolCallIds.clear();
+  ctx().pendingToolEmissions.clear();
 
 	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context);
 	const promptBlocks = extractUserPromptBlocks(context.messages);
@@ -1939,10 +1924,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		diagDump("empty_prompt", {
 			contextLength: context.messages.length,
 			lastMsgRole: lastMsg?.role,
-			isReentrant,
 			stackDepth: stackDepth(),
 			activeQueryExists: ctx().activeQuery !== null,
-			sharedSession: sharedSession ? { sessionId: sharedSession.sessionId.slice(0, 8), cursor: sharedSession.cursor } : null,
+			sharedSession: bridgeSession().session ? { sessionId: bridgeSession().session.sessionId.slice(0, 8), cursor: bridgeSession().session.cursor } : null,
 			messageRoles: context.messages.map((m, i) => `[${i}]${m.role}`).join(" "),
 		});
 		// Recover: use a continuation prompt so the SDK doesn't send an empty text block
@@ -2038,14 +2022,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const sdkQuery = query({ prompt, options: queryOptions });
 	ctx().activeQuery = sdkQuery;
 
-	// Register this turn's ALS store while the query is in flight so pi's
-	// out-of-scope follow-up calls (tool results, steers) can rejoin it — see
-	// the entry-point routing above. Top-level turns only: a reentrant subagent
-	// query already lives inside its parent's registered store.
-	const turnStore = currentTurnStore();
-	if (!isReentrant) registerActiveTurnStore(turnStore);
-
-	// 4. Capture context for abort handling (must be AFTER pushContext)
+	// Capture this query's context for abort handling.
 	const abortCtx = ctx();
 
 	const requestAbort = () => {
@@ -2069,7 +2046,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				streamIdleTimedOut = true;
 				abortCtx.deferredUserMessages = [];
 				abortCtx.handledTerminalError = true;
-				if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+				if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
 				const errorMessage = buildStreamIdleTimeoutErrorMessage(timeoutMs);
 				debug("provider: stream idle timeout", `model=${model.id}`, `timeout=${timeoutMs}`, `idle=${idleMs}`);
 				emitRateLimitEvent({
@@ -2083,7 +2060,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 					status: "rejected",
 					timeoutMs,
 				});
-				piUI?.notify(`${RATE_LIMIT_TOKEN} Claude stream idle timeout after ${formatDurationShort(timeoutMs)} — retrying via rate-limit backoff`, "warning");
+				bridgeSession().piUI?.notify(`${RATE_LIMIT_TOKEN} Claude stream idle timeout after ${formatDurationShort(timeoutMs)} — retrying via rate-limit backoff`, "warning");
 				if (abortCtx.turnOutput) {
 					abortCtx.turnOutput.stopReason = "error";
 					abortCtx.turnOutput.errorMessage = errorMessage;
@@ -2107,12 +2084,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	}
 	const onAbort = () => {
 		wasAborted = true;
-		// Prevent stale deferred messages from being replayed by parent on pop
+		// Prevent canceled messages from being replayed in this session.
 		abortCtx.deferredUserMessages = [];
 		reportToolResultMismatch(abortCtx, "abort", cwd, { forceRotate: true });
 		for (const pending of abortCtx.pendingToolCalls.values()) { pending.resolve({ content: [{ type: "text", text: "Operation aborted" }] }); }
 		abortCtx.pendingToolCalls.clear();
 		abortCtx.pendingResults.clear();
+    abortCtx.pendingToolEmissions.clear();
 		requestAbort();
 	};
 	if (options?.signal) {
@@ -2132,9 +2110,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 			// --- Abort detection in normal completion path ---
 			if (wasAborted || options?.signal?.aborted) {
-				if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+				if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
 				ctx().deferredUserMessages = [];
-				debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
+				debug(`provider: abort detected, marked bridgeSession().session needsRebuild + forceRotate`);
 				if (ctx().turnOutput) {
 					ctx().turnOutput.stopReason = "aborted";
 					ctx().turnOutput.errorMessage = "Operation aborted";
@@ -2146,24 +2124,23 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			}
 
 			// --- Capture session ID ---
-			const sessionId = capturedSessionId ?? sharedSession?.sessionId;
+			const sessionId = capturedSessionId ?? bridgeSession().session?.sessionId;
 			if (sessionId) {
-				const cursor = Math.max(context.messages.length, ctx().latestCursor, sharedSession?.cursor ?? 0);
+				const cursor = Math.max(context.messages.length, ctx().latestCursor, bridgeSession().session?.cursor ?? 0);
 				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
-				sharedSession = { sessionId, cursor, cwd };
+				bridgeSession().session = { sessionId, cursor, cwd };
 			}
 
 			// --- Replay deferred user messages as continuation queries ---
-			// Only for outermost queries — reentrant (subagent) queries leave
-			// deferred messages for the parent to handle after it finishes.
+      // A steer belongs only to this Pi session, including when it is a child.
 			try {
-				while (ctx().deferredUserMessages.length > 0 && !isReentrant && !wasAborted) {
+				while (ctx().deferredUserMessages.length > 0 && !wasAborted) {
 					const steerPrompt = ctx().deferredUserMessages.shift()!;
 					debug(`provider: replaying deferred user message: ${steerPrompt.slice(0, 60)}`);
 					ctx().resetTurnState(model);
 					ctx().resetToolTracking();
 
-					const resumeId = sharedSession?.sessionId;
+					const resumeId = bridgeSession().session?.sessionId;
 					if (!resumeId) {
 						debug(`WARNING: no session to resume for deferred message, dropping`);
 						break;
@@ -2177,9 +2154,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 					try {
 						const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted);
-						const sid = contSid ?? sharedSession?.sessionId;
+						const sid = contSid ?? bridgeSession().session?.sessionId;
 						if (sid) {
-							sharedSession = { sessionId: sid, cursor: sharedSession?.cursor ?? 0, cwd };
+							bridgeSession().session = { sessionId: sid, cursor: bridgeSession().session?.cursor ?? 0, cwd };
 						}
 					} catch (contError) {
 						debug(`provider: continuation query error:`, contError);
@@ -2193,16 +2170,18 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				ctx().activeQuery = sdkQuery;
 			}
 
+      reportToolResultMismatch(ctx(), "query completion", cwd);
+      ctx().activeQuery = null;
 			finalizeCurrentStream(ctx().turnOutput?.stopReason);
 		})
 		.catch((error) => {
 			debug(`provider: query error, model=${model.id}, aborted=${Boolean(options?.signal?.aborted)}, error=`, error);
 			const suppressDuplicateError = ctx().handledTerminalError || streamIdleTimedOut;
 			const openedExtraUsage = !suppressDuplicateError && isExtraUsageRequiredMessage(error) && launchExtraUsageHelperIfAllowed(cwd, bridgeConfig, "query error");
-			if ((wasAborted || options?.signal?.aborted) && sharedSession) {
-				sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+			if ((wasAborted || options?.signal?.aborted) && bridgeSession().session) {
+				bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
 			} else {
-				sharedSession = null;
+				bridgeSession().session = null;
 			}
 			ctx().deferredUserMessages = [];
 			if (suppressDuplicateError) {
@@ -2218,22 +2197,18 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			ctx().currentPiStream = null;
 		})
 		.finally(() => {
-			if (!isReentrant) unregisterActiveTurnStore(turnStore);
 			streamIdleWatchdog?.dispose();
 			activeStreamIdleWatchdogs.delete(abortCtx);
 			if (options?.signal) options.signal.removeEventListener("abort", onAbort);
-			if (ctx().activeQuery === sdkQuery) {
+			if (ctx().activeQuery === sdkQuery || ctx().activeQuery === null) {
 				reportToolResultMismatch(ctx(), "query teardown", cwd, { forceRotate: wasAborted || options?.signal?.aborted || streamIdleTimedOut });
 				// Drain pending handlers for this query
 				for (const pending of ctx().pendingToolCalls.values()) { pending.resolve({ content: [{ type: "text", text: "Query ended" }] }); }
 				ctx().pendingToolCalls.clear();
 				ctx().pendingResults.clear();
+        ctx().pendingToolEmissions.clear();
 
-				if (isReentrant) {
-					popContext();  // merges deferred messages and restores parent
-				} else {
-					ctx().activeQuery = null;
-				}
+				ctx().activeQuery = null;
 			}
 			sdkQuery.close();
 		});
@@ -2308,7 +2283,15 @@ function registerBridgeCommands(pi: ExtensionAPI): void {
 // --- Extension registration ---
 
 export default function (pi: ExtensionAPI) {
-	extensionApi = pi;
+  let registeredHere = false;
+  const on = (name: any, handler: (event: any, host: any) => any) => pi.on(name, (event: any, host: any) => {
+    const id = host.sessionManager.getSessionId();
+    return runWithSessionContext(id, () => {
+      bridgeSession().extensionApi = pi;
+      bridgeSession().piUI = host.ui;
+      return handler(event, host);
+    });
+  });
 	// Disable non-essential Claude Code traffic (update checks, MCP registry, telemetry)
 	process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
 
@@ -2322,21 +2305,21 @@ export default function (pi: ExtensionAPI) {
 
 	// Reset shared session on pi session lifecycle events
 	const clearSession = (event: string) => {
-		debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
-		sharedSession = null;
+		debug(`${event}: clearing session ${bridgeSession().session?.sessionId?.slice(0, 8) ?? "none"}`);
+		bridgeSession().session = null;
 
 		// Clear the global streamSimple if this instance registered it.
 		// This allows /reload to work — the old instance clears the flag so
 		// the new instance can register fresh without wrapping stale state.
 		const g = globalThis as Record<symbol, any>;
-		if (g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
+		if (registeredHere && g[ACTIVE_STREAM_SIMPLE_KEY] === streamClaudeAgentSdk) {
 			debug(`${event}: clearing ACTIVE_STREAM_SIMPLE_KEY`);
 			g[ACTIVE_STREAM_SIMPLE_KEY] = undefined;
 		}
 	};
-	pi.on("session_start", (event, ctx) => {
+	on("session_start", (event, ctx) => {
 		recordProjectTrust(ctx);
-		piUI = ctx.ui;
+		bridgeSession().piUI = ctx.ui;
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
@@ -2346,8 +2329,11 @@ export default function (pi: ExtensionAPI) {
 		// fork point. Letting the first fork turn rebuild is the correct path.
 		if (event.reason === "startup" || event.reason === "resume") restoreSharedSessionFromPi(ctx);
 	});
-	pi.on("session_shutdown", () => clearSession("session_shutdown"));
-	pi.on("message_end", (event, ctx) => {
+	on("session_shutdown", (_event, host) => {
+    clearSession("session_shutdown");
+    forgetSessionContext(host.sessionManager.getSessionId());
+  });
+	on("message_end", (event, ctx) => {
 		const message = (event as { message?: AssistantMessage }).message;
 		if (message?.role === "assistant" && message.provider === PROVIDER_ID) schedulePersistSharedSession(ctx);
 	});
@@ -2361,15 +2347,15 @@ export default function (pi: ExtensionAPI) {
 	// call down the REBUILD path so CC sees the current history.
 	const markRebuild = (event: string) => {
 		if (ctx().activeQuery) {
-			reportToolResultMismatch(ctx(), event, sharedSession?.cwd ?? process.cwd());
+			reportToolResultMismatch(ctx(), event, bridgeSession().session?.cwd ?? process.cwd());
 		}
-		if (sharedSession) {
-			debug(`${event}: marking needsRebuild on session ${sharedSession.sessionId.slice(0, 8)}`);
-			sharedSession = { ...sharedSession, needsRebuild: true };
+		if (bridgeSession().session) {
+			debug(`${event}: marking needsRebuild on session ${bridgeSession().session.sessionId.slice(0, 8)}`);
+			bridgeSession().session = { ...bridgeSession().session, needsRebuild: true };
 		}
 	};
-	pi.on("session_compact", () => markRebuild("session_compact"));
-	pi.on("session_tree", () => markRebuild("session_tree"));
+	on("session_compact", () => markRebuild("session_compact"));
+	on("session_tree", () => markRebuild("session_tree"));
 
 	// --- Provider ---
 	//
@@ -2381,6 +2367,7 @@ export default function (pi: ExtensionAPI) {
 	const g = globalThis as Record<symbol, any>;
 	if (!g[ACTIVE_STREAM_SIMPLE_KEY]) {
 		// First instance: store our streamSimple and register.
+    registeredHere = true;
 		g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
 		pi.registerProvider(PROVIDER_ID, {
 			baseUrl: "claude-bridge",
@@ -2394,8 +2381,7 @@ export default function (pi: ExtensionAPI) {
 		// Subsequent instance (subagent session): skip registration entirely.
 		// The subagent already has access to claude-bridge models via the shared
 		// ModelRegistry from the parent's registration. Calls to those models
-		// will route through the parent's streamSimple via the reentrant
-		// QueryContext stack mechanism.
+    // use the shared dispatcher, which selects state by the caller's Pi session ID.
 		debug(`provider: skipping re-registration, parent instance active (module=${moduleInstanceId})`);
 	}
 
