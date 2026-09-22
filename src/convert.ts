@@ -193,3 +193,58 @@ export function convertPiMessages(
 
 	return { anthropicMessages, sanitizedIds };
 }
+
+type SystemLikeMessage = {
+	role: "system";
+	content?: string | Array<{ type: string; text?: string }>;
+	sections?: Record<string, string | null>;
+	toolsAdded?: Array<{ name: string; [key: string]: unknown }>;
+	toolsRemoved?: Array<{ name: string } | string>;
+};
+
+type LegacyContextLike<TMessage, TTool> = {
+	systemPrompt?: string;
+	tools?: TTool[];
+	messages: TMessage[];
+};
+
+/**
+ * Pi 0.86+ hands providers a TranscriptContext: the system prompt and tool
+ * declarations ride in `role: "system"` messages instead of `systemPrompt` and
+ * `tools`. The bridge's session sync, tool-result extraction, and Claude history
+ * rebuild all expect the older shape (no system messages), so replay the system
+ * messages into `systemPrompt`/`tools` and drop them from `messages`. Older Pi
+ * contexts carry no system messages and pass through unchanged.
+ *
+ * Mirrors pi-ai's getCurrentSystemPrompt/getCurrentTools; reimplemented here
+ * because pi-ai releases before 0.86 do not export them.
+ */
+export function toLegacyContext<TContext extends LegacyContextLike<any, any>>(context: TContext): TContext {
+	const messages = context.messages as Array<{ role: string }>;
+	if (!messages.some((m) => m.role === "system")) return context;
+	const content: string[] = [];
+	const sections = new Map<string, string>();
+	const tools = new Map<string, unknown>();
+	for (const message of messages) {
+		if (message.role !== "system") continue;
+		const system = message as SystemLikeMessage;
+		const text = typeof system.content === "string"
+			? system.content
+			: (system.content ?? []).map((block) => (block.type === "text" ? block.text ?? "" : "")).join("");
+		if (text.length > 0) content.push(text);
+		for (const [name, value] of Object.entries(system.sections ?? {})) {
+			if (value === null) sections.delete(name);
+			else sections.set(name, value);
+		}
+		// pi-ai types removals as ToolReference ({ name }); accept bare names too.
+		for (const tool of system.toolsRemoved ?? []) tools.delete(typeof tool === "string" ? tool : tool.name);
+		for (const tool of system.toolsAdded ?? []) tools.set(tool.name, tool);
+	}
+	const promptParts = [content.join("\n\n"), ...sections.values()].filter((part) => part.length > 0);
+	return {
+		...context,
+		systemPrompt: promptParts.join("\n\n"),
+		tools: [...tools.values()],
+		messages: messages.filter((m) => m.role !== "system"),
+	};
+}

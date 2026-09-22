@@ -5,12 +5,17 @@
 export const FABLE_MODEL_ID = "claude-fable-5";
 export const FABLE_FALLBACK_MODEL_ID = "claude-opus-4-8";
 
+export const FABLE_5_1_MODEL_ID = "claude-fable-5-1";
+
 export function fallbackModelForPrimaryModel(modelId: string): string | undefined {
-	return modelId === FABLE_MODEL_ID ? FABLE_FALLBACK_MODEL_ID : undefined;
+	return modelId === FABLE_MODEL_ID || modelId === FABLE_5_1_MODEL_ID ? FABLE_FALLBACK_MODEL_ID : undefined;
 }
 
 export const MODEL_IDS_IN_ORDER = [
+	"claude-fable-5-1",
 	FABLE_MODEL_ID,
+	"claude-opus-5-5",
+	"claude-opus-5",
 	FABLE_FALLBACK_MODEL_ID,
 	"claude-opus-4-7",
 	"claude-opus-4-6",
@@ -29,9 +34,36 @@ type BridgeModelMetadata = {
 };
 
 const FALLBACK_MODELS: Record<string, BridgeModelMetadata> = {
+	"claude-fable-5-1": {
+		id: "claude-fable-5-1",
+		name: "Claude Fable 5.1",
+		reasoning: true,
+		thinkingLevelMap: { xhigh: "xhigh" },
+		input: ["text", "image"],
+		contextWindow: 1000000,
+		maxTokens: 128000,
+	},
 	[FABLE_MODEL_ID]: {
 		id: FABLE_MODEL_ID,
 		name: "Claude Fable 5",
+		reasoning: true,
+		thinkingLevelMap: { xhigh: "xhigh" },
+		input: ["text", "image"],
+		contextWindow: 1000000,
+		maxTokens: 128000,
+	},
+	"claude-opus-5-5": {
+		id: "claude-opus-5-5",
+		name: "Claude Opus 5.5",
+		reasoning: true,
+		thinkingLevelMap: { xhigh: "xhigh" },
+		input: ["text", "image"],
+		contextWindow: 1000000,
+		maxTokens: 128000,
+	},
+	"claude-opus-5": {
+		id: "claude-opus-5",
+		name: "Claude Opus 5",
 		reasoning: true,
 		thinkingLevelMap: { xhigh: "xhigh" },
 		input: ["text", "image"],
@@ -66,6 +98,8 @@ export function buildModels<T extends { id: string; [key: string]: any }>(piAiMo
 
 export function resolveModelId(models: Array<{ id: string }>, input: string): string {
 	const lower = input.toLowerCase();
-	const match = models.find((m) => m.id === lower || m.id.includes(lower));
+	// Exact IDs win before substring shortcuts: "claude-opus-5" is a substring of
+	// "claude-opus-5-5", which is listed first.
+	const match = models.find((m) => m.id === lower) ?? models.find((m) => m.id.includes(lower));
 	return match ? match.id : input;
 }

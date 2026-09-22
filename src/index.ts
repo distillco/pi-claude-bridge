@@ -1,4 +1,4 @@
-import { calculateCost, getModels, type AssistantMessage, type AssistantMessageEventStream, type Context, type Model, type SimpleStreamOptions, type Tool } from "@earendil-works/pi-ai";
+import { calculateCost, getModels, type AssistantMessage, type AssistantMessageEventStream, type Context, type Model, type SimpleStreamOptions, type Tool, type ToolCall } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { createSdkMcpServer, query, type EffortLevel, type SDKMessage, type SDKUserMessage, type SettingSource, type SpawnOptions, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
@@ -10,7 +10,7 @@ import { accessSync, appendFileSync, chmodSync, constants as fsConstants, mkdirS
 import { resolve as pathResolve } from "path";
 import { homedir } from "os";
 import { delimiter, dirname, join } from "path";
-import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
+import { PROVIDER_ID, messageContentToText, convertPiMessages, toLegacyContext } from "./convert.js";
 import { FABLE_FALLBACK_MODEL_ID, FABLE_MODEL_ID, buildModels, fallbackModelForPrimaryModel } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, extractSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
@@ -1561,7 +1561,8 @@ export function flushPendingToolEmissions(): void {
   for (const call of c.pendingToolEmissions.values()) {
     if (c.emittedToolCallIds.has(call.id)) continue;
     ensureTurnStarted();
-    const block = { type: "toolCall" as const, id: call.id, name: call.toolName, arguments: call.arguments };
+    // Pi 0.86+ types ToolCall.arguments as JsonObject; the SDK hands us parsed JSON.
+    const block = { type: "toolCall" as const, id: call.id, name: call.toolName, arguments: call.arguments as ToolCall["arguments"] };
     c.turnBlocks.push(block);
     const contentIndex = c.turnBlocks.length - 1;
     c.currentPiStream.push({ type: "toolcall_start", contentIndex, partial: c.turnOutput });
@@ -1753,8 +1754,9 @@ async function consumeQuery(
 					const fallbackModel = (message as any).fallback_model;
 					updateTurnOutputModel(fallbackModel);
 					debug("consumeQuery: model_refusal_fallback", JSON.stringify({ originalModel, fallbackModel }));
-					if (originalModel === FABLE_MODEL_ID && fallbackModel === FABLE_FALLBACK_MODEL_ID) {
-						safeNotify("Claude bridge switched Fable 5 to Opus 4.8 after Claude Code safety fallback.", "info");
+					if (fallbackModelForPrimaryModel(originalModel) === fallbackModel && fallbackModel === FABLE_FALLBACK_MODEL_ID) {
+						const originalName = originalModel === FABLE_MODEL_ID ? "Fable 5" : "Fable 5.1";
+						safeNotify(`Claude bridge switched ${originalName} to Opus 4.8 after Claude Code safety fallback.`, "info");
 					}
 				}
 				break;
@@ -1800,7 +1802,8 @@ async function consumeQuery(
 
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
-export function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+export function streamClaudeAgentSdk(model: Model<any>, rawContext: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+  const context = toLegacyContext(rawContext);
   return runWithSessionContext(options?.sessionId || options?.signal || context.messages[0],
     () => streamForSession(model, context, options), true);
 }
