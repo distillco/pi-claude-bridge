@@ -37341,14 +37341,42 @@ function convertPiMessages(messages, customToolNameToSdk) {
   }
   return { anthropicMessages, sanitizedIds };
 }
+function toLegacyContext(context) {
+  const messages = context.messages;
+  if (!messages.some((m) => m.role === "system")) return context;
+  const content = [];
+  const sections = /* @__PURE__ */ new Map();
+  const tools = /* @__PURE__ */ new Map();
+  for (const message of messages) {
+    if (message.role !== "system") continue;
+    const system = message;
+    const text = typeof system.content === "string" ? system.content : (system.content ?? []).map((block) => block.type === "text" ? block.text ?? "" : "").join("");
+    if (text.length > 0) content.push(text);
+    for (const [name, value] of Object.entries(system.sections ?? {})) {
+      if (value === null) sections.delete(name);
+      else sections.set(name, value);
+    }
+    for (const tool of system.toolsRemoved ?? []) tools.delete(tool.name);
+    for (const tool of system.toolsAdded ?? []) tools.set(tool.name, tool);
+  }
+  const promptParts = [content.join("\n\n"), ...sections.values()].filter((part) => part.length > 0);
+  return {
+    ...context,
+    systemPrompt: promptParts.join("\n\n"),
+    tools: [...tools.values()],
+    messages: messages.filter((m) => m.role !== "system")
+  };
+}
 
 // src/models.ts
 var FABLE_MODEL_ID = "claude-fable-5";
 var FABLE_FALLBACK_MODEL_ID = "claude-opus-4-8";
+var FABLE_5_1_MODEL_ID = "claude-fable-5-1";
 function fallbackModelForPrimaryModel(modelId) {
-  return modelId === FABLE_MODEL_ID ? FABLE_FALLBACK_MODEL_ID : void 0;
+  return modelId === FABLE_MODEL_ID || modelId === FABLE_5_1_MODEL_ID ? FABLE_FALLBACK_MODEL_ID : void 0;
 }
 var MODEL_IDS_IN_ORDER = [
+  "claude-fable-5-1",
   FABLE_MODEL_ID,
   "claude-opus-5-5",
   "claude-opus-5",
@@ -37359,6 +37387,15 @@ var MODEL_IDS_IN_ORDER = [
   "claude-haiku-4-5"
 ];
 var FALLBACK_MODELS = {
+  "claude-fable-5-1": {
+    id: "claude-fable-5-1",
+    name: "Claude Fable 5.1",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh" },
+    input: ["text", "image"],
+    contextWindow: 1e6,
+    maxTokens: 128e3
+  },
   [FABLE_MODEL_ID]: {
     id: FABLE_MODEL_ID,
     name: "Claude Fable 5",
@@ -54068,8 +54105,9 @@ async function consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConf
           const fallbackModel = message.fallback_model;
           updateTurnOutputModel(fallbackModel);
           debug("consumeQuery: model_refusal_fallback", JSON.stringify({ originalModel, fallbackModel }));
-          if (originalModel === FABLE_MODEL_ID && fallbackModel === FABLE_FALLBACK_MODEL_ID) {
-            safeNotify("Claude bridge switched Fable 5 to Opus 4.8 after Claude Code safety fallback.", "info");
+          if (fallbackModelForPrimaryModel(originalModel) === fallbackModel && fallbackModel === FABLE_FALLBACK_MODEL_ID) {
+            const originalName = originalModel === FABLE_MODEL_ID ? "Fable 5" : "Fable 5.1";
+            safeNotify(`Claude bridge switched ${originalName} to Opus 4.8 after Claude Code safety fallback.`, "info");
           }
         }
         break;
@@ -54110,7 +54148,8 @@ async function consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConf
   debug(`consumeQuery: for-await loop exited, wasAborted=${wasAborted()}, capturedSessionId=${capturedSessionId?.slice(0, 8) ?? "none"}`);
   return { capturedSessionId };
 }
-function streamClaudeAgentSdk(model, context, options) {
+function streamClaudeAgentSdk(model, rawContext, options) {
+  const context = toLegacyContext(rawContext);
   return runWithSessionContext(
     options?.sessionId || options?.signal || context.messages[0],
     () => streamForSession(model, context, options),

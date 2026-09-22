@@ -34,14 +34,14 @@ describe("MODELS projection", () => {
 		assert.deepEqual(models.map((m) => m.id), MODEL_IDS_IN_ORDER);
 	});
 
-	it("lists Fable 5, then the newest Opus models", () => {
+	it("lists Fable 5.1 and Fable 5, then the newest Opus models", () => {
 		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
-		assert.deepEqual(models.slice(0, 4).map((m) => m.id), [FABLE_MODEL_ID, "claude-opus-5-5", "claude-opus-5", FABLE_FALLBACK_MODEL_ID]);
+		assert.deepEqual(models.slice(0, 5).map((m) => m.id), ["claude-fable-5-1", FABLE_MODEL_ID, "claude-opus-5-5", "claude-opus-5", FABLE_FALLBACK_MODEL_ID]);
 	});
 
 	it("fills bridge-owned future IDs missing from pi-ai and drops unknown missing IDs", () => {
 		const models = buildModels([mockPiAiModel("claude-haiku-4-5")]);
-		assert.deepEqual(models.map((m) => m.id), ["claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5"]);
+		assert.deepEqual(models.map((m) => m.id), ["claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5"]);
 		assert.equal(models.find((m) => m.id === "claude-opus-5-5")?.name, "Claude Opus 5.5");
 		assert.equal(models.find((m) => m.id === "claude-opus-5-5")?.maxTokens, 128000);
 		assert.equal(models.find((m) => m.id === "claude-fable-5")?.name, "Claude Fable 5");
@@ -84,8 +84,8 @@ describe("resolveModelId", () => {
 		assert.equal(resolveModelId(models, "opus"), "claude-opus-5-5");
 	});
 
-	it("fable shortcut resolves to claude-fable-5", () => {
-		assert.equal(resolveModelId(models, "fable"), "claude-fable-5");
+	it("fable shortcut resolves to claude-fable-5-1 (first fable in order)", () => {
+		assert.equal(resolveModelId(models, "fable"), "claude-fable-5-1");
 	});
 
 	it("haiku shortcut resolves to claude-haiku-4-5", () => {
@@ -100,8 +100,10 @@ describe("resolveModelId", () => {
 		assert.equal(resolveModelId(models, "gpt-9"), "gpt-9");
 	});
 
-	it("configures Opus 4.8 availability fallback for Fable 5 only", () => {
+	it("configures Opus 4.8 availability fallback for Fable models only", () => {
 		assert.equal(fallbackModelForPrimaryModel(FABLE_MODEL_ID), FABLE_FALLBACK_MODEL_ID);
+		assert.equal(fallbackModelForPrimaryModel("claude-fable-5-1"), FABLE_FALLBACK_MODEL_ID);
+		assert.equal(fallbackModelForPrimaryModel("claude-opus-5-5"), undefined);
 		assert.equal(fallbackModelForPrimaryModel(FABLE_FALLBACK_MODEL_ID), undefined);
 		assert.equal(fallbackModelForPrimaryModel("claude-sonnet-4-6"), undefined);
 	});

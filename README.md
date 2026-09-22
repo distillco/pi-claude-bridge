@@ -20,7 +20,7 @@ Restart Pi after installation.
 
 ## Highlights
 
-- `claude-bridge/claude-fable-5`, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet, and Haiku in `/model`.
+- `claude-bridge/claude-fable-5-1`, Fable 5, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7, Sonnet, and Haiku in `/model`.
 - Pi tool calls run on Pi; Claude Code handles reasoning.
 - Tool-use turns block until Pi-delivered tool results reach Claude Code, including persistent subagent panes.
 - Session continuity across normal turns, `/compact`, tree navigation, and abort recovery.
