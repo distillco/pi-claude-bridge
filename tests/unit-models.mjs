@@ -34,15 +34,16 @@ describe("MODELS projection", () => {
 		assert.deepEqual(models.map((m) => m.id), MODEL_IDS_IN_ORDER);
 	});
 
-	it("lists Fable 5 before Opus models", () => {
+	it("lists Fable 5, then the newest Opus models", () => {
 		const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
-		assert.equal(models[0]?.id, FABLE_MODEL_ID);
-		assert.equal(models[1]?.id, FABLE_FALLBACK_MODEL_ID);
+		assert.deepEqual(models.slice(0, 4).map((m) => m.id), [FABLE_MODEL_ID, "claude-opus-5-5", "claude-opus-5", FABLE_FALLBACK_MODEL_ID]);
 	});
 
 	it("fills bridge-owned future IDs missing from pi-ai and drops unknown missing IDs", () => {
 		const models = buildModels([mockPiAiModel("claude-haiku-4-5")]);
-		assert.deepEqual(models.map((m) => m.id), ["claude-fable-5", "claude-opus-4-8", "claude-haiku-4-5"]);
+		assert.deepEqual(models.map((m) => m.id), ["claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5"]);
+		assert.equal(models.find((m) => m.id === "claude-opus-5-5")?.name, "Claude Opus 5.5");
+		assert.equal(models.find((m) => m.id === "claude-opus-5-5")?.maxTokens, 128000);
 		assert.equal(models.find((m) => m.id === "claude-fable-5")?.name, "Claude Fable 5");
 		assert.equal(models.find((m) => m.id === "claude-fable-5")?.contextWindow, 1000000);
 		assert.equal(models.find((m) => m.id === "claude-opus-4-8")?.maxTokens, 128000);
@@ -79,8 +80,8 @@ describe("MODELS projection", () => {
 describe("resolveModelId", () => {
 	const models = buildModels(MODEL_IDS_IN_ORDER.map(mockPiAiModel));
 
-	it("opus shortcut resolves to claude-opus-4-8 (first opus in order)", () => {
-		assert.equal(resolveModelId(models, "opus"), "claude-opus-4-8");
+	it("opus shortcut resolves to claude-opus-5-5 (first opus in order)", () => {
+		assert.equal(resolveModelId(models, "opus"), "claude-opus-5-5");
 	});
 
 	it("fable shortcut resolves to claude-fable-5", () => {

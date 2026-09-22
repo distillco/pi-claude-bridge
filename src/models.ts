@@ -11,6 +11,8 @@ export function fallbackModelForPrimaryModel(modelId: string): string | undefine
 
 export const MODEL_IDS_IN_ORDER = [
 	FABLE_MODEL_ID,
+	"claude-opus-5-5",
+	"claude-opus-5",
 	FABLE_FALLBACK_MODEL_ID,
 	"claude-opus-4-7",
 	"claude-opus-4-6",
@@ -32,6 +34,24 @@ const FALLBACK_MODELS: Record<string, BridgeModelMetadata> = {
 	[FABLE_MODEL_ID]: {
 		id: FABLE_MODEL_ID,
 		name: "Claude Fable 5",
+		reasoning: true,
+		thinkingLevelMap: { xhigh: "xhigh" },
+		input: ["text", "image"],
+		contextWindow: 1000000,
+		maxTokens: 128000,
+	},
+	"claude-opus-5-5": {
+		id: "claude-opus-5-5",
+		name: "Claude Opus 5.5",
+		reasoning: true,
+		thinkingLevelMap: { xhigh: "xhigh" },
+		input: ["text", "image"],
+		contextWindow: 1000000,
+		maxTokens: 128000,
+	},
+	"claude-opus-5": {
+		id: "claude-opus-5",
+		name: "Claude Opus 5",
 		reasoning: true,
 		thinkingLevelMap: { xhigh: "xhigh" },
 		input: ["text", "image"],

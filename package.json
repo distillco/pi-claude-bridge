@@ -1,6 +1,6 @@
 {
   "name": "@timsu/pi-claude-bridge",
-  "version": "1.5.8",
+  "version": "1.5.9",
   "description": "Pi provider bridge that runs Claude Code through the Claude Agent SDK. Fork of @vanillagreen/pi-claude-bridge with concurrent-task isolation.",
   "type": "module",
   "keywords": [
@@ -142,7 +142,7 @@
     }
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.158",
+    "@anthropic-ai/claude-agent-sdk": "0.3.280",
     "@anthropic-ai/sdk": "0.93.0",
     "cc-session-io": "^0.3.1",
     "change-case": "^5.4.4"
