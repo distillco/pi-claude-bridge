@@ -37356,7 +37356,7 @@ function toLegacyContext(context) {
       if (value === null) sections.delete(name);
       else sections.set(name, value);
     }
-    for (const tool of system.toolsRemoved ?? []) tools.delete(tool.name);
+    for (const tool of system.toolsRemoved ?? []) tools.delete(typeof tool === "string" ? tool : tool.name);
     for (const tool of system.toolsAdded ?? []) tools.set(tool.name, tool);
   }
   const promptParts = [content.join("\n\n"), ...sections.values()].filter((part) => part.length > 0);

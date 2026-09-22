@@ -25,12 +25,21 @@ describe("toLegacyContext", () => {
 		assert.deepEqual(ctx.messages, [user]);
 	});
 
+	it("accepts bare tool names in toolsRemoved", () => {
+		const ctx = toLegacyContext({ messages: [
+			{ role: "system", content: "base", toolsAdded: [read, bash], timestamp: 0 },
+			{ role: "system", content: "", toolsRemoved: ["bash"], timestamp: 1 },
+			user,
+		] });
+		assert.deepEqual(ctx.tools.map((t) => t.name), ["read"]);
+	});
+
 	it("replays mid-conversation prompt, section, and tool changes", () => {
 		const ctx = toLegacyContext({ messages: [
 			{ role: "system", content: "base", sections: { skills: "<skills>a</skills>" }, toolsAdded: [read, bash], timestamp: 0 },
 			user,
 			assistant,
-			{ role: "system", content: [{ type: "text", text: "more" }], sections: { skills: "<skills>b</skills>" }, toolsRemoved: [bash], timestamp: 3 },
+			{ role: "system", content: [{ type: "text", text: "more" }], sections: { skills: "<skills>b</skills>" }, toolsRemoved: [{ name: "bash" }], timestamp: 3 },
 			user,
 		] });
 		assert.equal(ctx.systemPrompt, "base\n\nmore\n\n<skills>b</skills>");

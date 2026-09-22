@@ -98,6 +98,8 @@ export function buildModels<T extends { id: string; [key: string]: any }>(piAiMo
 
 export function resolveModelId(models: Array<{ id: string }>, input: string): string {
 	const lower = input.toLowerCase();
-	const match = models.find((m) => m.id === lower || m.id.includes(lower));
+	// Exact IDs win before substring shortcuts: "claude-opus-5" is a substring of
+	// "claude-opus-5-5", which is listed first.
+	const match = models.find((m) => m.id === lower) ?? models.find((m) => m.id.includes(lower));
 	return match ? match.id : input;
 }

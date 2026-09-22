@@ -199,7 +199,7 @@ type SystemLikeMessage = {
 	content?: string | Array<{ type: string; text?: string }>;
 	sections?: Record<string, string | null>;
 	toolsAdded?: Array<{ name: string; [key: string]: unknown }>;
-	toolsRemoved?: Array<{ name: string; [key: string]: unknown }>;
+	toolsRemoved?: Array<{ name: string } | string>;
 };
 
 type LegacyContextLike<TMessage, TTool> = {
@@ -236,7 +236,8 @@ export function toLegacyContext<TContext extends LegacyContextLike<any, any>>(co
 			if (value === null) sections.delete(name);
 			else sections.set(name, value);
 		}
-		for (const tool of system.toolsRemoved ?? []) tools.delete(tool.name);
+		// pi-ai types removals as ToolReference ({ name }); accept bare names too.
+		for (const tool of system.toolsRemoved ?? []) tools.delete(typeof tool === "string" ? tool : tool.name);
 		for (const tool of system.toolsAdded ?? []) tools.set(tool.name, tool);
 	}
 	const promptParts = [content.join("\n\n"), ...sections.values()].filter((part) => part.length > 0);

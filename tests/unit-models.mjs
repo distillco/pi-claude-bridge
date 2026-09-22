@@ -42,8 +42,13 @@ describe("MODELS projection", () => {
 	it("fills bridge-owned future IDs missing from pi-ai and drops unknown missing IDs", () => {
 		const models = buildModels([mockPiAiModel("claude-haiku-4-5")]);
 		assert.deepEqual(models.map((m) => m.id), ["claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5"]);
-		assert.equal(models.find((m) => m.id === "claude-opus-5-5")?.name, "Claude Opus 5.5");
-		assert.equal(models.find((m) => m.id === "claude-opus-5-5")?.maxTokens, 128000);
+		for (const [id, name] of [["claude-fable-5-1", "Claude Fable 5.1"], ["claude-opus-5-5", "Claude Opus 5.5"], ["claude-opus-5", "Claude Opus 5"]]) {
+			const m = models.find((model) => model.id === id);
+			assert.equal(m?.name, name);
+			assert.equal(m?.contextWindow, 1000000);
+			assert.equal(m?.maxTokens, 128000);
+			assert.deepEqual(m?.thinkingLevelMap, { xhigh: "xhigh" });
+		}
 		assert.equal(models.find((m) => m.id === "claude-fable-5")?.name, "Claude Fable 5");
 		assert.equal(models.find((m) => m.id === "claude-fable-5")?.contextWindow, 1000000);
 		assert.equal(models.find((m) => m.id === "claude-opus-4-8")?.maxTokens, 128000);
@@ -90,6 +95,12 @@ describe("resolveModelId", () => {
 
 	it("haiku shortcut resolves to claude-haiku-4-5", () => {
 		assert.equal(resolveModelId(models, "haiku"), "claude-haiku-4-5");
+	});
+
+	it("exact IDs win over longer IDs that contain them", () => {
+		assert.equal(resolveModelId(models, "claude-opus-5"), "claude-opus-5");
+		assert.equal(resolveModelId(models, "claude-fable-5"), "claude-fable-5");
+		assert.equal(resolveModelId(models, "claude-opus-5-5"), "claude-opus-5-5");
 	});
 
 	it("full ID passes through unchanged", () => {
