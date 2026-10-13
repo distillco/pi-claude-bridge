@@ -896,7 +896,7 @@ function schedulePersistSharedSession(ctxLike?: { sessionManager?: unknown }): v
 	if (!bridgeSession().extensionApi || !bridgeSession().session || !ctxLike?.sessionManager) return;
 	const snapshot = { ...bridgeSession().session };
   const api = bridgeSession().extensionApi;
-	const timer = setTimeout(() => {
+	setTimeout(() => {
 		try {
 			const built = readBuiltSessionContext(ctxLike.sessionManager);
 			if (!built) return;
@@ -914,7 +914,9 @@ function schedulePersistSharedSession(ctxLike?: { sessionManager?: unknown }): v
 			debug("persistSharedSession failed:", error);
 		}
 	}, 0);
-	timer.unref?.();
+	// Not unref'd: a `-p` run exits as soon as the turn ends, and an unref'd timer
+	// lets it exit before the entry reaches the session file. A later resume then
+	// rebuilds the Claude session from scratch instead of reattaching.
 }
 
 // Convert pi messages to Anthropic API format for session import.
@@ -1953,13 +1955,15 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 	const appendParts = [agentsAppend, skillsAppend, promptContextAppend.text].filter((part): part is string => Boolean(part));
 	const systemPromptAppend = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 
-	// MCP auto-loading suppression: with appendSystemPrompt=true (default), the
-	// SDK uses isolation mode and avoids filesystem settings. If users turn that
-	// off, load user/project settings but pass --strict-mcp-config so Claude Code
-	// ignores auto-discovered filesystem MCP servers while Pi owns tool execution.
-	const settingSources: SettingSource[] | undefined = appendSystemPrompt
-		? undefined
-		: providerSettings.settingSources ?? ["user", "project"];
+	// Filesystem settings: with appendSystemPrompt=true (default) the bridge forwards
+	// CLAUDE.md and the skills block itself, so Claude Code runs in the SDK's isolation
+	// mode. That takes an explicit `settingSources: []`; omitting the option loads every
+	// source (user, project, local), including their hooks, plugins and MCP servers.
+	// If users turn appendSystemPrompt off, load user/project settings but pass
+	// --strict-mcp-config so Claude Code ignores auto-discovered filesystem MCP servers
+	// while Pi owns tool execution.
+	const settingSources: SettingSource[] =
+		providerSettings.settingSources ?? (appendSystemPrompt ? [] : ["user", "project"]);
 	const strictMcpConfigEnabled = !appendSystemPrompt && providerSettings.strictMcpConfig !== false;
 	const claudeExecutable = resolveClaudeExecutable(providerSettings.pathToClaudeCodeExecutable);
 	const claudeExecutablePreflight = claudeExecutable ? preflightClaudeExecutable(claudeExecutable, cwd) : undefined;
@@ -1983,7 +1987,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 
 	// Suppress claude.ai cloud MCP servers (Figma/Canva/etc. auto-discovered via OAuth
 	// when the user is logged into Anthropic). These are a separate code path from
-	// filesystem MCP and are NOT blocked by --strict-mcp-config or settingSources=undefined.
+	// filesystem MCP and are NOT blocked by --strict-mcp-config or settingSources=[].
 	// The native CC binary gates them on env var ENABLE_CLAUDEAI_MCP_SERVERS: setting it
 	// to "0"/"false"/"no"/"off" makes the loader return early before any cloud fetch.
 	// DISABLE_AUTO_COMPACT=1: pi owns context-management and propagates its own
@@ -2007,7 +2011,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 		},
 		extraArgs,
 		...(effort ? { effort } : {}),
-		...(settingSources ? { settingSources } : {}),
+		settingSources,
 		...(mcpServers ? { mcpServers } : {}),
 		...(resumeSessionId ? { resume: resumeSessionId } : {}),
 		...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),

@@ -53469,7 +53469,7 @@ function schedulePersistSharedSession(ctxLike) {
   if (!bridgeSession().extensionApi || !bridgeSession().session || !ctxLike?.sessionManager) return;
   const snapshot = { ...bridgeSession().session };
   const api = bridgeSession().extensionApi;
-  const timer = setTimeout(() => {
+  setTimeout(() => {
     try {
       const built = readBuiltSessionContext(ctxLike.sessionManager);
       if (!built) return;
@@ -53487,7 +53487,6 @@ function schedulePersistSharedSession(ctxLike) {
       debug("persistSharedSession failed:", error51);
     }
   }, 0);
-  timer.unref?.();
 }
 function convertAndImportMessages(session, messages, customToolNameToSdk, cwd) {
   const { anthropicMessages, sanitizedIds } = convertPiMessages(messages, customToolNameToSdk);
@@ -54264,7 +54263,7 @@ function streamForSession(model, context, options) {
   const promptContextAppend = buildPromptContextAppend(context.systemPrompt, cwd, bridgeConfig.promptContext ?? {});
   const appendParts = [agentsAppend, skillsAppend, promptContextAppend.text].filter((part) => Boolean(part));
   const systemPromptAppend = appendParts.length > 0 ? appendParts.join("\n\n") : void 0;
-  const settingSources = appendSystemPrompt ? void 0 : providerSettings.settingSources ?? ["user", "project"];
+  const settingSources = providerSettings.settingSources ?? (appendSystemPrompt ? [] : ["user", "project"]);
   const strictMcpConfigEnabled = !appendSystemPrompt && providerSettings.strictMcpConfig !== false;
   const claudeExecutable = resolveClaudeExecutable(providerSettings.pathToClaudeCodeExecutable);
   const claudeExecutablePreflight = claudeExecutable ? preflightClaudeExecutable(claudeExecutable, cwd) : void 0;
@@ -54292,7 +54291,7 @@ function streamForSession(model, context, options) {
     },
     extraArgs,
     ...effort ? { effort } : {},
-    ...settingSources ? { settingSources } : {},
+    settingSources,
     ...mcpServers ? { mcpServers } : {},
     ...resumeSessionId ? { resume: resumeSessionId } : {},
     ...claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {},
