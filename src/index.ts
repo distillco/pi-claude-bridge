@@ -1656,7 +1656,10 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
 	const assistantMsg = (message as any).message;
 	if (!assistantMsg?.content) return;
   if (!c.currentPiStream) {
-    appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi);
+    // The stream is closed, so turnOutput belongs to a message Pi already
+    // consumed and closedOutputTokens already counted. Queue any late tool
+    // calls but leave its usage alone; reconcileQueryOutput settles the rest.
+    appendMissingToolUsesFromAssistant({ content: assistantMsg.content }, model, customToolNameToPi);
     return;
   }
 	updateTurnOutputModel(assistantMsg.model);

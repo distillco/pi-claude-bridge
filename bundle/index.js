@@ -54049,7 +54049,7 @@ function processAssistantMessage(message, model, customToolNameToPi) {
   const assistantMsg = message.message;
   if (!assistantMsg?.content) return;
   if (!c.currentPiStream) {
-    appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi);
+    appendMissingToolUsesFromAssistant({ content: assistantMsg.content }, model, customToolNameToPi);
     return;
   }
   updateTurnOutputModel(assistantMsg.model);

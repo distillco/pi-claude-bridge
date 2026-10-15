@@ -91,6 +91,26 @@ describe("reconcileQueryOutput", () => {
 		assert.equal(closedOutput + ctx().turnOutput.usage.output, 4300);
 	});
 
+	it("leaves a closed message's usage alone when its assistant message arrives late", () => {
+		const c = ctx();
+		installFakeStream();
+		messageStart(4);
+		c.turnSawStreamEvent = true;
+		const toolUse = { type: "tool_use", id: "toolu_1", name: "mcp__custom-tools__read", input: { file_path: "a.txt" } };
+		assistant([toolUse]);
+		const closed = c.turnOutput;
+		assert.equal(c.currentPiStream, null);
+
+		// consumeQuery forwards the tool-use turn's assistant message after the stream closed.
+		processAssistantMessage({
+			type: "assistant",
+			message: { model: model.id, content: [toolUse], usage: { input_tokens: 10, output_tokens: 900 } },
+		}, model, toolNames);
+
+		assert.equal(closed.usage.output, 4);
+		assert.equal(c.closedOutputTokens, 4);
+	});
+
 	it("leaves usage alone when no result arrives", () => {
 		runToolThenTextQuery();
 		assert.equal(ctx().turnOutput.usage.output, 4);
