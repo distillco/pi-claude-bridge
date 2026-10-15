@@ -37383,6 +37383,8 @@ var MODEL_IDS_IN_ORDER = [
   FABLE_FALLBACK_MODEL_ID,
   "claude-opus-4-7",
   "claude-opus-4-6",
+  "claude-sonnet-5-5",
+  "claude-sonnet-5",
   "claude-sonnet-4-6",
   "claude-haiku-4-5"
 ];
@@ -37417,6 +37419,24 @@ var FALLBACK_MODELS = {
   "claude-opus-5": {
     id: "claude-opus-5",
     name: "Claude Opus 5",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh" },
+    input: ["text", "image"],
+    contextWindow: 1e6,
+    maxTokens: 128e3
+  },
+  "claude-sonnet-5-5": {
+    id: "claude-sonnet-5-5",
+    name: "Claude Sonnet 5.5",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh" },
+    input: ["text", "image"],
+    contextWindow: 1e6,
+    maxTokens: 128e3
+  },
+  "claude-sonnet-5": {
+    id: "claude-sonnet-5",
+    name: "Claude Sonnet 5",
     reasoning: true,
     thinkingLevelMap: { xhigh: "xhigh" },
     input: ["text", "image"],
@@ -37620,6 +37640,11 @@ var QueryContext = class {
   reportedToolResultMismatch = false;
   deferredUserMessages = [];
   handledTerminalError = false;
+  // Output tokens on the Pi messages this query already closed. Claude Code
+  // sends a tool-use message's real output count after Pi consumed it, so the
+  // SDK result reconciles the query total onto the last message. Reset per
+  // query, not in resetTurnState, which runs once per Pi message.
+  closedOutputTokens = 0;
   // Per-turn (reset together)
   turnOutput = null;
   turnStarted = false;
@@ -53943,9 +53968,23 @@ function finishToolUseStream() {
     if (block.type === "toolCall") c.emittedToolCallIds.add(block.id);
   }
   c.turnOutput.stopReason = "toolUse";
+  c.closedOutputTokens += c.turnOutput.usage.output;
   c.currentPiStream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
   c.currentPiStream.end();
   c.currentPiStream = null;
+}
+function reconcileQueryOutput(message, model) {
+  const c = ctx();
+  if (!c.turnOutput || message.type !== "result") return;
+  const sideModels = Object.keys(message.modelUsage ?? {}).filter((id) => id !== model.id && id !== c.turnOutput.model);
+  if (sideModels.length > 0) debug(`usage: result modelUsage also lists ${sideModels.join(",")}; only usage.output_tokens is reconciled`);
+  const total = message.usage?.output_tokens;
+  if (total == null) return;
+  const current = c.turnOutput.usage.output;
+  const outputTokens = Math.max(current, total - c.closedOutputTokens);
+  if (outputTokens === current) return;
+  debug(`usage: reconcile query output ${current} -> ${outputTokens} (query total=${total}, closed=${c.closedOutputTokens})`);
+  updateUsage(c.turnOutput, { output_tokens: outputTokens }, model);
 }
 function flushPendingToolEmissions() {
   const c = ctx();
@@ -54010,7 +54049,7 @@ function processAssistantMessage(message, model, customToolNameToPi) {
   const assistantMsg = message.message;
   if (!assistantMsg?.content) return;
   if (!c.currentPiStream) {
-    appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi);
+    appendMissingToolUsesFromAssistant({ content: assistantMsg.content }, model, customToolNameToPi);
     return;
   }
   updateTurnOutputModel(assistantMsg.model);
@@ -54073,6 +54112,7 @@ async function consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConf
         processAssistantMessage(message, model, customToolNameToPi);
         break;
       case "result":
+        reconcileQueryOutput(message, model);
         if (!ctx().turnSawStreamEvent && message.subtype === "success") {
           ensureTurnStarted();
           const text = message.result || "";
@@ -54237,6 +54277,7 @@ function streamForSession(model, context, options) {
   ctx().resetTurnState(model);
   ctx().resetToolTracking();
   ctx().latestCursor = 0;
+  ctx().closedOutputTokens = 0;
   ctx().emittedToolCallIds.clear();
   ctx().pendingToolEmissions.clear();
   const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context);
@@ -54419,8 +54460,10 @@ function streamForSession(model, context, options) {
       while (ctx().deferredUserMessages.length > 0 && !wasAborted) {
         const steerPrompt = ctx().deferredUserMessages.shift();
         debug(`provider: replaying deferred user message: ${steerPrompt.slice(0, 60)}`);
+        const carriedOutput = ctx().turnOutput?.usage.output ?? 0;
         ctx().resetTurnState(model);
         ctx().resetToolTracking();
+        ctx().closedOutputTokens = -carriedOutput;
         const resumeId = bridgeSession().session?.sessionId;
         if (!resumeId) {
           debug(`WARNING: no session to resume for deferred message, dropping`);
@@ -54641,6 +54684,7 @@ export {
   preflightClaudeExecutable,
   processAssistantMessage,
   processStreamEvent,
+  reconcileQueryOutput,
   reportToolResultMismatch,
   resolveConfiguredEffort,
   restoreSharedSessionFromPi,

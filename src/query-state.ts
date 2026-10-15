@@ -127,6 +127,11 @@ export class QueryContext {
 	reportedToolResultMismatch = false;
 	deferredUserMessages: string[] = [];
 	handledTerminalError = false;
+	// Output tokens on the Pi messages this query already closed. Claude Code
+	// sends a tool-use message's real output count after Pi consumed it, so the
+	// SDK result reconciles the query total onto the last message. Reset per
+	// query, not in resetTurnState, which runs once per Pi message.
+	closedOutputTokens = 0;
 
 	// Per-turn (reset together)
 	turnOutput: AssistantMessage | null = null;

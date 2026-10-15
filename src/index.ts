@@ -1550,9 +1550,32 @@ function finishToolUseStream(): void {
     if (block.type === "toolCall") c.emittedToolCallIds.add(block.id);
   }
   c.turnOutput.stopReason = "toolUse";
+  c.closedOutputTokens += c.turnOutput.usage.output;
   c.currentPiStream.push({ type: "done", reason: "toolUse", message: c.turnOutput });
   c.currentPiStream.end();
   c.currentPiStream = null;
+}
+
+/** Claude Code reports a tool-use message's output tokens only after Pi has
+ * consumed that message, so per-message counts fall short. The SDK result
+ * carries the query's real output; put the shortfall on the open message so
+ * the session total matches. The total is `usage.output_tokens`, which covers
+ * this query's main loop. `modelUsage` cannot serve: on a resumed session it
+ * continues from the totals the transcript saved, and bridge queries normally
+ * pass `resume`. */
+export function reconcileQueryOutput(message: SDKMessage, model: Model<any>): void {
+	const c = ctx();
+	if (!c.turnOutput || message.type !== "result") return;
+	const sideModels = Object.keys(message.modelUsage ?? {})
+		.filter((id) => id !== model.id && id !== c.turnOutput!.model);
+	if (sideModels.length > 0) debug(`usage: result modelUsage also lists ${sideModels.join(",")}; only usage.output_tokens is reconciled`);
+	const total = message.usage?.output_tokens;
+	if (total == null) return;
+	const current = c.turnOutput.usage.output;
+	const outputTokens = Math.max(current, total - c.closedOutputTokens);
+	if (outputTokens === current) return;
+	debug(`usage: reconcile query output ${current} -> ${outputTokens} (query total=${total}, closed=${c.closedOutputTokens})`);
+	updateUsage(c.turnOutput, { output_tokens: outputTokens }, model);
 }
 
 /** Pi supplies a new stream when it returns the preceding tool results. Deliver
@@ -1633,7 +1656,10 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
 	const assistantMsg = (message as any).message;
 	if (!assistantMsg?.content) return;
   if (!c.currentPiStream) {
-    appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi);
+    // The stream is closed, so turnOutput belongs to a message Pi already
+    // consumed and closedOutputTokens already counted. Queue any late tool
+    // calls but leave its usage alone; reconcileQueryOutput settles the rest.
+    appendMissingToolUsesFromAssistant({ content: assistantMsg.content }, model, customToolNameToPi);
     return;
   }
 	updateTurnOutputModel(assistantMsg.model);
@@ -1725,6 +1751,7 @@ async function consumeQuery(
 				processAssistantMessage(message, model, customToolNameToPi);
 				break;
 			case "result":
+				reconcileQueryOutput(message, model);
 				if (!ctx().turnSawStreamEvent && message.subtype === "success") {
 					ensureTurnStarted();
 					const text = message.result || "";
@@ -1920,6 +1947,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 	ctx().resetTurnState(model);
 	ctx().resetToolTracking();
 	ctx().latestCursor = 0;
+	ctx().closedOutputTokens = 0;
   ctx().emittedToolCallIds.clear();
   ctx().pendingToolEmissions.clear();
 
@@ -2154,8 +2182,12 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 				while (ctx().deferredUserMessages.length > 0 && !wasAborted) {
 					const steerPrompt = ctx().deferredUserMessages.shift()!;
 					debug(`provider: replaying deferred user message: ${steerPrompt.slice(0, 60)}`);
+					// The same Pi stream stays open, so resetTurnState drops the output the
+					// previous query reconciled; the continuation's result carries it forward.
+					const carriedOutput = ctx().turnOutput?.usage.output ?? 0;
 					ctx().resetTurnState(model);
 					ctx().resetToolTracking();
+					ctx().closedOutputTokens = -carriedOutput;
 
 					const resumeId = bridgeSession().session?.sessionId;
 					if (!resumeId) {
