@@ -41,8 +41,8 @@ describe("MODELS projection", () => {
 
 	it("fills bridge-owned future IDs missing from pi-ai and drops unknown missing IDs", () => {
 		const models = buildModels([mockPiAiModel("claude-haiku-4-5")]);
-		assert.deepEqual(models.map((m) => m.id), ["claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-4-5"]);
-		for (const [id, name] of [["claude-fable-5-1", "Claude Fable 5.1"], ["claude-opus-5-5", "Claude Opus 5.5"], ["claude-opus-5", "Claude Opus 5"], ["claude-sonnet-5-5", "Claude Sonnet 5.5"], ["claude-sonnet-5", "Claude Sonnet 5"]]) {
+		assert.deepEqual(models.map((m) => m.id), ["claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5", "claude-haiku-4-5"]);
+		for (const [id, name] of [["claude-fable-5-1", "Claude Fable 5.1"], ["claude-opus-5-5", "Claude Opus 5.5"], ["claude-opus-5", "Claude Opus 5"], ["claude-sonnet-5-5", "Claude Sonnet 5.5"], ["claude-sonnet-5", "Claude Sonnet 5"], ["claude-haiku-5-5", "Claude Haiku 5.5"]]) {
 			const m = models.find((model) => model.id === id);
 			assert.equal(m?.name, name);
 			assert.equal(m?.contextWindow, 1000000);
@@ -97,8 +97,8 @@ describe("resolveModelId", () => {
 		assert.equal(resolveModelId(models, "sonnet"), "claude-sonnet-5-5");
 	});
 
-	it("haiku shortcut resolves to claude-haiku-4-5", () => {
-		assert.equal(resolveModelId(models, "haiku"), "claude-haiku-4-5");
+	it("haiku shortcut resolves to claude-haiku-5-5 (first haiku in order)", () => {
+		assert.equal(resolveModelId(models, "haiku"), "claude-haiku-5-5");
 	});
 
 	it("exact IDs win over longer IDs that contain them", () => {
@@ -107,6 +107,8 @@ describe("resolveModelId", () => {
 		assert.equal(resolveModelId(models, "claude-opus-5-5"), "claude-opus-5-5");
 		assert.equal(resolveModelId(models, "claude-sonnet-5"), "claude-sonnet-5");
 		assert.equal(resolveModelId(models, "claude-sonnet-5-5"), "claude-sonnet-5-5");
+		assert.equal(resolveModelId(models, "claude-haiku-4-5"), "claude-haiku-4-5");
+		assert.equal(resolveModelId(models, "claude-haiku-5-5"), "claude-haiku-5-5");
 	});
 
 	it("full ID passes through unchanged", () => {
