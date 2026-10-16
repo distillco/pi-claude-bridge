@@ -37386,6 +37386,7 @@ var MODEL_IDS_IN_ORDER = [
   "claude-sonnet-5-5",
   "claude-sonnet-5",
   "claude-sonnet-4-6",
+  "claude-haiku-5-5",
   "claude-haiku-4-5"
 ];
 var FALLBACK_MODELS = {
@@ -37437,6 +37438,15 @@ var FALLBACK_MODELS = {
   "claude-sonnet-5": {
     id: "claude-sonnet-5",
     name: "Claude Sonnet 5",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "xhigh" },
+    input: ["text", "image"],
+    contextWindow: 1e6,
+    maxTokens: 128e3
+  },
+  "claude-haiku-5-5": {
+    id: "claude-haiku-5-5",
+    name: "Claude Haiku 5.5",
     reasoning: true,
     thinkingLevelMap: { xhigh: "xhigh" },
     input: ["text", "image"],
