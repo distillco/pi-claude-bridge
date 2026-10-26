@@ -45,3 +45,55 @@ export function extractAllToolResults(
 	}
 	return { results, stopIdx };
 }
+
+function userText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((block: { type?: string; text?: string }) => (block?.type === "text" && typeof block.text === "string" ? block.text : ""))
+		.filter(Boolean)
+		.join("\n");
+}
+
+// User messages Pi placed after this turn's assistant message, in order: steers
+// delivered beside the tool results, or follow-ups. Pi may put one between
+// parallel results, so the tail role says nothing. Messages before `fromIdx`
+// were seen by an earlier provider call and are skipped.
+export function extractInjectedUserMessages(
+	messages: Array<{ role: string; content?: unknown; [key: string]: unknown }>,
+	fromIdx = 0,
+): string[] {
+	const texts: string[] = [];
+	for (let i = messages.length - 1; i >= Math.max(0, fromIdx); i--) {
+		const msg = messages[i];
+		if (msg.role === "assistant") break;
+		if (msg.role === "user") {
+			const text = userText(msg.content).trim();
+			if (text) texts.unshift(text);
+		}
+	}
+	return texts;
+}
+
+// Pi's context does not mark a user message as a steer or a follow-up, but its
+// input event does. The bridge records steered input text and claims each
+// record once when the message appears in context.
+export function takeSteeredInput(steeredInputs: string[], text: string): boolean {
+	const index = steeredInputs.indexOf(text.trim());
+	if (index === -1) return false;
+	steeredInputs.splice(index, 1);
+	return true;
+}
+
+// The running Claude query cannot take a new user turn, but it is waiting for
+// these tool results. Carrying the steered text inside the last one lets Claude
+// read it on its next step instead of after the whole query ends.
+export function withSteeredUserText(result: McpResult, text: string): McpResult {
+	return {
+		...result,
+		content: [
+			...result.content,
+			{ type: "text", text: `\n\nThe user sent this message while the tool call ran. Read it before continuing:\n\n${text}` },
+		],
+	};
+}

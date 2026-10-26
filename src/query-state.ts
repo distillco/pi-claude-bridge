@@ -126,6 +126,8 @@ export class QueryContext {
 	unmatchedToolResultIds = new Set<string>();
 	reportedToolResultMismatch = false;
 	deferredUserMessages: string[] = [];
+	// Input text Pi queued as steering during this query (see takeSteeredInput).
+	steeredInputs: string[] = [];
 	handledTerminalError = false;
 	// Output tokens on the Pi messages this query already closed. Claude Code
 	// sends a tool-use message's real output count after Pi consumed it, so the

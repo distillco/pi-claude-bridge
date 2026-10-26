@@ -37594,6 +37594,42 @@ function extractAllToolResults(messages) {
   }
   return { results, stopIdx };
 }
+function userText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((block) => block?.type === "text" && typeof block.text === "string" ? block.text : "").filter(Boolean).join("\n");
+}
+function extractInjectedUserMessages(messages, fromIdx = 0) {
+  const texts = [];
+  for (let i = messages.length - 1; i >= Math.max(0, fromIdx); i--) {
+    const msg = messages[i];
+    if (msg.role === "assistant") break;
+    if (msg.role === "user") {
+      const text = userText(msg.content).trim();
+      if (text) texts.unshift(text);
+    }
+  }
+  return texts;
+}
+function takeSteeredInput(steeredInputs, text) {
+  const index = steeredInputs.indexOf(text.trim());
+  if (index === -1) return false;
+  steeredInputs.splice(index, 1);
+  return true;
+}
+function withSteeredUserText(result, text) {
+  return {
+    ...result,
+    content: [
+      ...result.content,
+      { type: "text", text: `
+
+The user sent this message while the tool call ran. Read it before continuing:
+
+${text}` }
+    ]
+  };
+}
 
 // src/query-state.ts
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -37649,6 +37685,8 @@ var QueryContext = class {
   unmatchedToolResultIds = /* @__PURE__ */ new Set();
   reportedToolResultMismatch = false;
   deferredUserMessages = [];
+  // Input text Pi queued as steering during this query (see takeSteeredInput).
+  steeredInputs = [];
   handledTerminalError = false;
   // Output tokens on the Pi messages this query already closed. Claude Code
   // sends a tool-use message's real output count after Pi consumed it, so the
@@ -54218,7 +54256,16 @@ function streamForSession(model, context, options) {
     const allResults = extractAllToolResults2(context);
     debug(`provider: tool results, ${allResults.length} results, ${queryCtx.pendingToolCalls.size} waiting handlers, ctx.msgs=${context.messages.length}`);
     const unmatchedResultIds = [];
-    for (const result of allResults) {
+    const injected = extractInjectedUserMessages(
+      context.messages,
+      queryCtx.latestCursor
+    );
+    const steered = injected.filter((text) => takeSteeredInput(queryCtx.steeredInputs, text));
+    const steerCarrier = steered.length ? [...allResults].reverse().find((result) => result.toolCallId && queryCtx.hasRecordedToolCall(result.toolCallId)) : void 0;
+    const steeredText = steerCarrier ? steered.join("\n\n") : null;
+    if (steerCarrier) debug(`provider: delivering steered user message with tool result [${steerCarrier.toolCallId}]: ${steeredText.slice(0, 60)}`);
+    for (const original of allResults) {
+      const result = original === steerCarrier ? withSteeredUserText(original, steeredText) : original;
       const id = result.toolCallId;
       if (id && !queryCtx.hasRecordedToolCall(id)) {
         queryCtx.markToolResultUnmatched(id);
@@ -54255,12 +54302,10 @@ function streamForSession(model, context, options) {
       debug(`WARNING: ${queryCtx.pendingToolCalls.size} MCP handlers still waiting after delivering ${allResults.length} results`);
       bridgeSession().piUI?.notify(`Claude bridge: ${queryCtx.pendingToolCalls.size} tool handler(s) still waiting \u2014 provider may be stuck`, "warning");
     }
-    if (lastMsgRole === "user") {
-      const userPrompt = extractUserPrompt(context.messages);
-      if (userPrompt) {
-        ctx().deferredUserMessages.push(userPrompt);
-        debug(`provider: deferred user message for replay after query: ${userPrompt.slice(0, 60)}`);
-      }
+    for (const userPrompt of injected) {
+      if (steerCarrier && steered.includes(userPrompt)) continue;
+      ctx().deferredUserMessages.push(userPrompt);
+      debug(`provider: deferred user message for replay after query: ${userPrompt.slice(0, 60)}`);
     }
     if (bridgeSession().session) bridgeSession().session.cursor = context.messages.length;
     queryCtx.latestCursor = Math.max(queryCtx.latestCursor, context.messages.length);
@@ -54653,6 +54698,12 @@ function index_default(pi) {
       bridgeSession().session = { ...bridgeSession().session, needsRebuild: true };
     }
   };
+  on2("input", (event) => {
+    if (event?.streamingBehavior !== "steer" || typeof event.text !== "string" || !event.text.trim()) return;
+    const steered = bridgeSession().steeredInputs;
+    steered.push(event.text.trim());
+    if (steered.length > 20) steered.shift();
+  });
   on2("session_compact", () => markRebuild("session_compact"));
   on2("session_tree", () => markRebuild("session_tree"));
   const g = globalThis;
