@@ -45,3 +45,42 @@ export function extractAllToolResults(
 	}
 	return { results, stopIdx };
 }
+
+function userText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((block: { type?: string; text?: string }) => (block?.type === "text" && typeof block.text === "string" ? block.text : ""))
+		.filter(Boolean)
+		.join("\n");
+}
+
+// User messages Pi placed in this turn's tail: a message steered in while the
+// tool calls ran, delivered beside their results. Null when there are none.
+export function extractSteeredUserText(
+	messages: Array<{ role: string; content?: unknown; [key: string]: unknown }>,
+): string | null {
+	const texts: string[] = [];
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role === "assistant") break;
+		if (msg.role === "user") {
+			const text = userText(msg.content).trim();
+			if (text) texts.unshift(text);
+		}
+	}
+	return texts.length ? texts.join("\n\n") : null;
+}
+
+// The running Claude query cannot take a new user turn, but it is waiting for
+// these tool results. Carrying the steered text inside the last one lets Claude
+// read it on its next step instead of after the whole query ends.
+export function withSteeredUserText(result: McpResult, text: string): McpResult {
+	return {
+		...result,
+		content: [
+			...result.content,
+			{ type: "text", text: `\n\nThe user sent this message while the tool call ran. Read it before continuing:\n\n${text}` },
+		],
+	};
+}

@@ -37594,6 +37594,36 @@ function extractAllToolResults(messages) {
   }
   return { results, stopIdx };
 }
+function userText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((block) => block?.type === "text" && typeof block.text === "string" ? block.text : "").filter(Boolean).join("\n");
+}
+function extractSteeredUserText(messages) {
+  const texts = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === "assistant") break;
+    if (msg.role === "user") {
+      const text = userText(msg.content).trim();
+      if (text) texts.unshift(text);
+    }
+  }
+  return texts.length ? texts.join("\n\n") : null;
+}
+function withSteeredUserText(result, text) {
+  return {
+    ...result,
+    content: [
+      ...result.content,
+      { type: "text", text: `
+
+The user sent this message while the tool call ran. Read it before continuing:
+
+${text}` }
+    ]
+  };
+}
 
 // src/query-state.ts
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -54218,7 +54248,11 @@ function streamForSession(model, context, options) {
     const allResults = extractAllToolResults2(context);
     debug(`provider: tool results, ${allResults.length} results, ${queryCtx.pendingToolCalls.size} waiting handlers, ctx.msgs=${context.messages.length}`);
     const unmatchedResultIds = [];
-    for (const result of allResults) {
+    const steeredText = lastMsgRole === "user" ? extractSteeredUserText(context.messages) : null;
+    const steerCarrier = steeredText ? [...allResults].reverse().find((result) => result.toolCallId && queryCtx.hasRecordedToolCall(result.toolCallId)) : void 0;
+    if (steerCarrier) debug(`provider: delivering steered user message with tool result [${steerCarrier.toolCallId}]: ${steeredText.slice(0, 60)}`);
+    for (const original of allResults) {
+      const result = original === steerCarrier ? withSteeredUserText(original, steeredText) : original;
       const id = result.toolCallId;
       if (id && !queryCtx.hasRecordedToolCall(id)) {
         queryCtx.markToolResultUnmatched(id);
@@ -54255,7 +54289,7 @@ function streamForSession(model, context, options) {
       debug(`WARNING: ${queryCtx.pendingToolCalls.size} MCP handlers still waiting after delivering ${allResults.length} results`);
       bridgeSession().piUI?.notify(`Claude bridge: ${queryCtx.pendingToolCalls.size} tool handler(s) still waiting \u2014 provider may be stuck`, "warning");
     }
-    if (lastMsgRole === "user") {
+    if (lastMsgRole === "user" && !steerCarrier) {
       const userPrompt = extractUserPrompt(context.messages);
       if (userPrompt) {
         ctx().deferredUserMessages.push(userPrompt);
