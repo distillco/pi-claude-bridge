@@ -55,13 +55,16 @@ function userText(content: unknown): string {
 		.join("\n");
 }
 
-// User messages Pi placed in this turn's tail: a message steered in while the
-// tool calls ran, delivered beside their results. Null when there are none.
-export function extractSteeredUserText(
+// User messages Pi placed after this turn's assistant message, in order: steers
+// delivered beside the tool results, or follow-ups. Pi may put one between
+// parallel results, so the tail role says nothing. Messages before `fromIdx`
+// were seen by an earlier provider call and are skipped.
+export function extractInjectedUserMessages(
 	messages: Array<{ role: string; content?: unknown; [key: string]: unknown }>,
-): string | null {
+	fromIdx = 0,
+): string[] {
 	const texts: string[] = [];
-	for (let i = messages.length - 1; i >= 0; i--) {
+	for (let i = messages.length - 1; i >= Math.max(0, fromIdx); i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant") break;
 		if (msg.role === "user") {
@@ -69,7 +72,17 @@ export function extractSteeredUserText(
 			if (text) texts.unshift(text);
 		}
 	}
-	return texts.length ? texts.join("\n\n") : null;
+	return texts;
+}
+
+// Pi's context does not mark a user message as a steer or a follow-up, but its
+// input event does. The bridge records steered input text and claims each
+// record once when the message appears in context.
+export function takeSteeredInput(steeredInputs: string[], text: string): boolean {
+	const index = steeredInputs.indexOf(text.trim());
+	if (index === -1) return false;
+	steeredInputs.splice(index, 1);
+	return true;
 }
 
 // The running Claude query cannot take a new user turn, but it is waiting for

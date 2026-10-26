@@ -14,7 +14,7 @@ import { PROVIDER_ID, messageContentToText, convertPiMessages, toLegacyContext }
 import { FABLE_FALLBACK_MODEL_ID, FABLE_MODEL_ID, buildModels, fallbackModelForPrimaryModel } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, extractSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
-import { extractAllToolResults as _extractAllToolResults, extractSteeredUserText, withSteeredUserText, type McpResult } from "./extract-tool-results.js";
+import { extractAllToolResults as _extractAllToolResults, extractInjectedUserMessages, takeSteeredInput, withSteeredUserText, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx, stackDepth, runWithSessionContext, forgetSessionContext, type SessionState } from "./query-state.js";
 import { findUnpairedToolUses, summarizeMissingToolNames, type MissingToolResult } from "./tool-pairing-audit.js";
 import { loadConfig, normalizeEffortLevel, recordProjectTrust, type Config } from "./config.js";
@@ -1858,13 +1858,17 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 		debug(`provider: tool results, ${allResults.length} results, ${queryCtx.pendingToolCalls.size} waiting handlers, ctx.msgs=${context.messages.length}`);
 		const unmatchedResultIds: string[] = [];
 		// A steered user message rides on the last result this query is waiting
-		// for. Without a result to carry it, it is replayed after the query.
-		const steeredText = lastMsgRole === "user"
-			? extractSteeredUserText(context.messages as unknown as Array<{ role: string; [key: string]: unknown }>)
-			: null;
-		const steerCarrier = steeredText
+		// for. Follow-ups wait for the query to finish, and so does a steer with
+		// no result to carry it: both are replayed afterwards (below).
+		const injected = extractInjectedUserMessages(
+			context.messages as unknown as Array<{ role: string; [key: string]: unknown }>,
+			queryCtx.latestCursor,
+		);
+		const steered = injected.filter((text) => takeSteeredInput(queryCtx.steeredInputs, text));
+		const steerCarrier = steered.length
 			? [...allResults].reverse().find((result) => result.toolCallId && queryCtx.hasRecordedToolCall(result.toolCallId))
 			: undefined;
+		const steeredText = steerCarrier ? steered.join("\n\n") : null;
 		if (steerCarrier) debug(`provider: delivering steered user message with tool result [${steerCarrier.toolCallId}]: ${steeredText!.slice(0, 60)}`);
 		for (const original of allResults) {
 			const result = original === steerCarrier ? withSteeredUserText(original, steeredText!) : original;
@@ -1913,12 +1917,10 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 		//   - A followUp is delivered between tool-result turns.
 		// The bridge can't forward these mid-query (the SDK query is in progress),
 		// so we save them for replay as continuation queries after consumeQuery ends.
-		if (lastMsgRole === "user" && !steerCarrier) {
-			const userPrompt = extractUserPrompt(context.messages);
-			if (userPrompt) {
-				ctx().deferredUserMessages.push(userPrompt);
-				debug(`provider: deferred user message for replay after query: ${userPrompt.slice(0, 60)}`);
-			}
+		for (const userPrompt of injected) {
+			if (steerCarrier && steered.includes(userPrompt)) continue;
+			ctx().deferredUserMessages.push(userPrompt);
+			debug(`provider: deferred user message for replay after query: ${userPrompt.slice(0, 60)}`);
 		}
 
 		if (bridgeSession().session) bridgeSession().session.cursor = context.messages.length;
@@ -2414,6 +2416,14 @@ export default function (pi: ExtensionAPI) {
 			bridgeSession().session = { ...bridgeSession().session, needsRebuild: true };
 		}
 	};
+	// Record which queued input is steering, so only steers ride on tool results.
+	// Bounded: an input another extension transforms never matches context text.
+	on("input", (event) => {
+		if (event?.streamingBehavior !== "steer" || typeof event.text !== "string" || !event.text.trim()) return;
+		const steered = bridgeSession().steeredInputs;
+		steered.push(event.text.trim());
+		if (steered.length > 20) steered.shift();
+	});
 	on("session_compact", () => markRebuild("session_compact"));
 	on("session_tree", () => markRebuild("session_tree"));
 
