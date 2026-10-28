@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const scratch = mkdtempSync(join(tmpdir(), "bridge-shutdown-"));
+const scratch = mkdtempSync(join(tmpdir(), "bridge-query-stop-"));
 process.env.CLAUDE_CONFIG_DIR = join(scratch, "claude");
 process.env.CLAUDE_BRIDGE_DIAG_PATH = join(scratch, "diag.log");
 process.env.CLAUDE_BRIDGE_DEBUG_PATH = join(scratch, "debug.log");
@@ -64,8 +64,7 @@ test("session_shutdown answers a held tool call with an error and ends the query
 });
 
 // Starts a turn whose first query ends with a deferred message queued, so the
-// bridge replays it as a continuation query. The first query streams text, so
-// its turn has started and its idle watchdog is disarmed when the continuation runs.
+// bridge replays it as a continuation query.
 async function startContinuation(sessionId, signal) {
   const handlers = new Map();
   register({ on: (name, fn) => handlers.set(name, fn), registerCommand() {}, registerProvider() {} });
@@ -76,9 +75,9 @@ async function startContinuation(sessionId, signal) {
   const first = queries.at(-1);
   const queryCtx = runWithSessionContext(sessionId, () => ctx());
   first.push({ type: "system", subtype: "init", session_id: `${sessionId}-session` });
+  // The text starts the turn, and the message after it disarms the idle
+  // watchdog, as the SDK's closing messages do in a real query.
   first.push({ type: "assistant", message: { content: [{ type: "text", text: "first answer" }] } });
-  // A message after the turn started disarms the idle watchdog, as the SDK's
-  // closing messages do in a real query.
   first.push({ type: "system", subtype: "status" });
   queryCtx.deferredUserMessages.push("follow up");
   first.close();

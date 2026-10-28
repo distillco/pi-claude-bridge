@@ -1670,10 +1670,10 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
 		// and the MCP handlers stay blocked until real tool results are delivered.
 		// Without this fallback, Claude Code can continue internally with empty MCP
 		// results and Pi only sees the real outputs one render cycle later.
-		// Claude Code also yields one assistant message per content block, with a
-		// null stop_reason until the API message ends. Closing on one of those
-		// would hand Pi the first tool call alone and serialize parallel calls, so
-		// those wait for message_stop.
+		// Claude Code also yields an assistant message per content block, with a
+		// null stop_reason until the API message ends. Closing on those would hand
+		// Pi one tool call at a time and serialize parallel calls, so they wait for
+		// message_stop.
 		if (appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi)) {
 			c.turnSawToolCall = true;
 			if (assistantMsg.stop_reason !== null) finishToolUseStream();
@@ -2165,8 +2165,9 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 		else options.signal.addEventListener("abort", onAbort, { once: true });
 	}
 
-	// Ends the Pi stream when a timeout, terminal error, or abort stopped the
-	// query. Both sdkQuery and a continuation check it when they finish.
+	// Returns true when a timeout, terminal error, or abort stopped the query,
+	// and for an abort ends the Pi stream as aborted. Checked after sdkQuery
+	// finishes and again after its continuations finish.
 	const endedByStop = (): boolean => {
 		if (streamIdleTimedOut || ctx().handledTerminalError) {
 			abortCtx.deferredUserMessages = [];
