@@ -210,8 +210,9 @@ for (const terminal of ["error", "abort", "quota", "timeout"]) test(`an immediat
   }
   // The watchdog's timer is unref'd, so hold the event loop open until it fires.
   const keepAlive = setTimeout(() => {}, 5000);
-  const failed = await first.result();
-  clearTimeout(keepAlive);
+  let failed;
+  try { failed = await first.result(); }
+  finally { clearTimeout(keepAlive); }
   assert.ok(["error", "aborted"].includes(failed.stopReason));
   const next = call("retry", [u, failed, user("retry now")]);
   assert.equal(queries.length, 2);

@@ -1664,16 +1664,13 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
   }
 	updateTurnOutputModel(assistantMsg.model);
 	if (c.turnSawStreamEvent) {
-		// Claude Agent SDK can yield the completed assistant message before (or
-		// instead of) a stream_event message_stop for a tool-use turn. Treat that
-		// assistant message as a hard turn boundary so Pi executes the tool calls
-		// and the MCP handlers stay blocked until real tool results are delivered.
-		// Without this fallback, Claude Code can continue internally with empty MCP
-		// results and Pi only sees the real outputs one render cycle later.
-		// Claude Code also yields an assistant message per content block, with a
-		// null stop_reason until the API message ends. Closing on those would hand
-		// Pi one tool call at a time and serialize parallel calls, so they wait for
-		// message_stop.
+		// While streaming, Claude Code yields an assistant message per content block.
+		// This adds any tool_use blocks the stream events missed. It does not end the
+		// Pi message on those: their stop_reason is null until the API message ends,
+		// and closing early would hand Pi one tool call at a time and serialize
+		// parallel calls. message_stop ends the turn. The stop_reason check closes
+		// only on an assistant message that carries a stop reason, which current
+		// Claude Code does not send on streamed turns.
 		if (appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi)) {
 			c.turnSawToolCall = true;
 			if (assistantMsg.stop_reason !== null) finishToolUseStream();
@@ -2168,7 +2165,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 	// Returns true when a timeout, terminal error, or abort stopped the query,
 	// and for an abort ends the Pi stream as aborted. Checked after sdkQuery
 	// finishes and again after its continuations finish.
-	const endedByStop = (): boolean => {
+	const finishIfStopped = (): boolean => {
 		if (streamIdleTimedOut || ctx().handledTerminalError) {
 			abortCtx.deferredUserMessages = [];
 			debug("provider: terminal error already surfaced; skipping normal completion");
@@ -2193,7 +2190,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 	consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted)
 		.then(async ({ capturedSessionId }) => {
 			debug(`provider: consumeQuery completed, stopReason=${ctx().turnOutput?.stopReason}, error=${ctx().turnOutput?.errorMessage}, aborted=${wasAborted}`);
-			if (endedByStop()) return;
+			if (finishIfStopped()) return;
 
 			// --- Capture session ID ---
 			const sessionId = capturedSessionId ?? bridgeSession().session?.sessionId;
@@ -2248,7 +2245,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 				// Guarantees restoration even if contQuery() throws synchronously
 				ctx().activeQuery = sdkQuery;
 			}
-			if (endedByStop()) return;
+			if (finishIfStopped()) return;
 
       reportToolResultMismatch(ctx(), "query completion", cwd);
       ctx().activeQuery = null;

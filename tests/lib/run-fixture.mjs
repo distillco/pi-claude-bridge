@@ -12,5 +12,5 @@ export function runFixture(path) {
   const result = spawnSync(process.execPath, ["--import", "./tests/lib/pi-compat.mjs", "--experimental-test-module-mocks", "--import", "tsx", "--test", path], {
     cwd: fileURLToPath(new URL("../../", import.meta.url)), encoding: "utf8", timeout: 20_000, env,
   });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.status, 0, `error=${result.error?.message ?? "none"} signal=${result.signal ?? "none"}\n${result.stdout}${result.stderr}`);
 }

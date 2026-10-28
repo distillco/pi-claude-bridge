@@ -126,8 +126,9 @@ test("the stream idle watchdog times out a continuation that sends nothing", { t
 
   // The watchdog's timer is unref'd, so hold the event loop open until it fires.
   const keepAlive = setTimeout(() => {}, 5000);
-  const result = await started.turn.result();
-  clearTimeout(keepAlive);
+  let result;
+  try { result = await started.turn.result(); }
+  finally { clearTimeout(keepAlive); }
   assert.equal(result.stopReason, "error");
   assert.equal(result.rateLimitType, "stream_idle");
   assert.equal(started.cont.closed, true, "the timeout must end the continuation query");

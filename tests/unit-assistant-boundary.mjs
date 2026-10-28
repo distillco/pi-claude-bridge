@@ -42,6 +42,7 @@ describe("assistant tool-use boundary fallback", () => {
 		processAssistantMessage({
 			type: "assistant",
 			message: {
+				stop_reason: "tool_use",
 				content: [{
 					type: "tool_use",
 					id: "toolu_1",
@@ -71,6 +72,7 @@ describe("assistant tool-use boundary fallback", () => {
 		processAssistantMessage({
 			type: "assistant",
 			message: {
+				stop_reason: "tool_use",
 				content: [{
 					type: "tool_use",
 					id: "toolu_missing",

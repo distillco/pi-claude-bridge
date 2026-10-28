@@ -54489,7 +54489,7 @@ function streamForSession(model, context, options) {
     if (options.signal.aborted) onAbort();
     else options.signal.addEventListener("abort", onAbort, { once: true });
   }
-  const endedByStop = () => {
+  const finishIfStopped = () => {
     if (streamIdleTimedOut || ctx().handledTerminalError) {
       abortCtx.deferredUserMessages = [];
       debug("provider: terminal error already surfaced; skipping normal completion");
@@ -54511,7 +54511,7 @@ function streamForSession(model, context, options) {
   };
   consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted).then(async ({ capturedSessionId }) => {
     debug(`provider: consumeQuery completed, stopReason=${ctx().turnOutput?.stopReason}, error=${ctx().turnOutput?.errorMessage}, aborted=${wasAborted}`);
-    if (endedByStop()) return;
+    if (finishIfStopped()) return;
     const sessionId = capturedSessionId ?? bridgeSession().session?.sessionId;
     if (sessionId) {
       const cursor = Math.max(context.messages.length, ctx().latestCursor, bridgeSession().session?.cursor ?? 0);
@@ -54553,7 +54553,7 @@ function streamForSession(model, context, options) {
     } finally {
       ctx().activeQuery = sdkQuery;
     }
-    if (endedByStop()) return;
+    if (finishIfStopped()) return;
     reportToolResultMismatch(ctx(), "query completion", cwd);
     ctx().activeQuery = null;
     finalizeCurrentStream(ctx().turnOutput?.stopReason);
