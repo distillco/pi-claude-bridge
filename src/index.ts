@@ -2077,7 +2077,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 	const abortCtx = ctx();
 
 	// A deferred-message continuation runs its own SDK query after sdkQuery has
-	// finished, so an abort must stop whichever of the two is running.
+	// finished, so an abort or idle timeout must act on whichever one is running.
 	let runningQuery = sdkQuery;
 	const requestAbort = () => {
 		// interrupt() asks the CLI to stop gracefully; close() kills it immediately.
@@ -2096,7 +2096,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 				turnStarted: abortCtx.turnStarted,
 			}),
 			onTimeout: ({ idleMs, timeoutMs }) => {
-				if (streamIdleTimedOut || wasAborted || options?.signal?.aborted || abortCtx.activeQuery !== sdkQuery) return;
+				if (streamIdleTimedOut || wasAborted || options?.signal?.aborted || abortCtx.activeQuery !== runningQuery) return;
 				streamIdleTimedOut = true;
 				abortCtx.deferredUserMessages = [];
 				abortCtx.handledTerminalError = true;
@@ -2161,31 +2161,34 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 		else options.signal.addEventListener("abort", onAbort, { once: true });
 	}
 
+	// Ends the Pi stream when a timeout, terminal error, or abort stopped the
+	// query. Both sdkQuery and a continuation check it when they finish.
+	const endedByStop = (): boolean => {
+		if (streamIdleTimedOut || ctx().handledTerminalError) {
+			abortCtx.deferredUserMessages = [];
+			debug("provider: terminal error already surfaced; skipping normal completion");
+			return true;
+		}
+		if (!wasAborted && !options?.signal?.aborted) return false;
+		if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
+		ctx().deferredUserMessages = [];
+		debug(`provider: abort detected, marked bridgeSession().session needsRebuild + forceRotate`);
+		if (ctx().turnOutput) {
+			ctx().turnOutput.stopReason = "aborted";
+			ctx().turnOutput.errorMessage = "Operation aborted";
+		}
+		ctx().activeQuery = null;
+		ctx().currentPiStream?.push({ type: "error", reason: "aborted", error: ctx().turnOutput! });
+		ctx().currentPiStream?.end();
+		ctx().currentPiStream = null;
+		return true;
+	};
+
 	// Background consumer — runs until query ends
 	consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted)
 		.then(async ({ capturedSessionId }) => {
 			debug(`provider: consumeQuery completed, stopReason=${ctx().turnOutput?.stopReason}, error=${ctx().turnOutput?.errorMessage}, aborted=${wasAborted}`);
-			if (streamIdleTimedOut || ctx().handledTerminalError) {
-				abortCtx.deferredUserMessages = [];
-				debug("provider: terminal error already surfaced; skipping normal completion");
-				return;
-			}
-
-			// --- Abort detection in normal completion path ---
-			if (wasAborted || options?.signal?.aborted) {
-				if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
-				ctx().deferredUserMessages = [];
-				debug(`provider: abort detected, marked bridgeSession().session needsRebuild + forceRotate`);
-				if (ctx().turnOutput) {
-					ctx().turnOutput.stopReason = "aborted";
-					ctx().turnOutput.errorMessage = "Operation aborted";
-				}
-				ctx().activeQuery = null;
-				ctx().currentPiStream?.push({ type: "error", reason: "aborted", error: ctx().turnOutput! });
-				ctx().currentPiStream?.end();
-				ctx().currentPiStream = null;
-				return;
-			}
+			if (endedByStop()) return;
 
 			// --- Capture session ID ---
 			const sessionId = capturedSessionId ?? bridgeSession().session?.sessionId;
@@ -2218,6 +2221,8 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 					const contQuery = query({ prompt: steerPrompt, options: contOptions });
 					ctx().activeQuery = contQuery;
 					runningQuery = contQuery;
+					// The first query's turn already started, which disarmed the watchdog.
+					activeStreamIdleWatchdogs.get(abortCtx)?.refresh();
 
 					debug(`provider: continuation query, model=${model.id}, resume=${resumeId.slice(0, 8)}, prompt=${steerPrompt.slice(0, 60)}`);
 
@@ -2238,6 +2243,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 				// Guarantees restoration even if contQuery() throws synchronously
 				ctx().activeQuery = sdkQuery;
 			}
+			if (endedByStop()) return;
 
       reportToolResultMismatch(ctx(), "query completion", cwd);
       ctx().activeQuery = null;

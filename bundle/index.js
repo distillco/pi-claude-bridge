@@ -54430,7 +54430,7 @@ function streamForSession(model, context, options) {
       turnStarted: abortCtx.turnStarted
     }),
     onTimeout: ({ idleMs, timeoutMs }) => {
-      if (streamIdleTimedOut || wasAborted || options?.signal?.aborted || abortCtx.activeQuery !== sdkQuery) return;
+      if (streamIdleTimedOut || wasAborted || options?.signal?.aborted || abortCtx.activeQuery !== runningQuery) return;
       streamIdleTimedOut = true;
       abortCtx.deferredUserMessages = [];
       abortCtx.handledTerminalError = true;
@@ -54489,27 +54489,29 @@ function streamForSession(model, context, options) {
     if (options.signal.aborted) onAbort();
     else options.signal.addEventListener("abort", onAbort, { once: true });
   }
-  consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted).then(async ({ capturedSessionId }) => {
-    debug(`provider: consumeQuery completed, stopReason=${ctx().turnOutput?.stopReason}, error=${ctx().turnOutput?.errorMessage}, aborted=${wasAborted}`);
+  const endedByStop = () => {
     if (streamIdleTimedOut || ctx().handledTerminalError) {
       abortCtx.deferredUserMessages = [];
       debug("provider: terminal error already surfaced; skipping normal completion");
-      return;
+      return true;
     }
-    if (wasAborted || options?.signal?.aborted) {
-      if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
-      ctx().deferredUserMessages = [];
-      debug(`provider: abort detected, marked bridgeSession().session needsRebuild + forceRotate`);
-      if (ctx().turnOutput) {
-        ctx().turnOutput.stopReason = "aborted";
-        ctx().turnOutput.errorMessage = "Operation aborted";
-      }
-      ctx().activeQuery = null;
-      ctx().currentPiStream?.push({ type: "error", reason: "aborted", error: ctx().turnOutput });
-      ctx().currentPiStream?.end();
-      ctx().currentPiStream = null;
-      return;
+    if (!wasAborted && !options?.signal?.aborted) return false;
+    if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
+    ctx().deferredUserMessages = [];
+    debug(`provider: abort detected, marked bridgeSession().session needsRebuild + forceRotate`);
+    if (ctx().turnOutput) {
+      ctx().turnOutput.stopReason = "aborted";
+      ctx().turnOutput.errorMessage = "Operation aborted";
     }
+    ctx().activeQuery = null;
+    ctx().currentPiStream?.push({ type: "error", reason: "aborted", error: ctx().turnOutput });
+    ctx().currentPiStream?.end();
+    ctx().currentPiStream = null;
+    return true;
+  };
+  consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted).then(async ({ capturedSessionId }) => {
+    debug(`provider: consumeQuery completed, stopReason=${ctx().turnOutput?.stopReason}, error=${ctx().turnOutput?.errorMessage}, aborted=${wasAborted}`);
+    if (endedByStop()) return;
     const sessionId = capturedSessionId ?? bridgeSession().session?.sessionId;
     if (sessionId) {
       const cursor = Math.max(context.messages.length, ctx().latestCursor, bridgeSession().session?.cursor ?? 0);
@@ -54533,6 +54535,7 @@ function streamForSession(model, context, options) {
         const contQuery = DQt({ prompt: steerPrompt, options: contOptions });
         ctx().activeQuery = contQuery;
         runningQuery = contQuery;
+        activeStreamIdleWatchdogs.get(abortCtx)?.refresh();
         debug(`provider: continuation query, model=${model.id}, resume=${resumeId.slice(0, 8)}, prompt=${steerPrompt.slice(0, 60)}`);
         try {
           const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted);
@@ -54550,6 +54553,7 @@ function streamForSession(model, context, options) {
     } finally {
       ctx().activeQuery = sdkQuery;
     }
+    if (endedByStop()) return;
     reportToolResultMismatch(ctx(), "query completion", cwd);
     ctx().activeQuery = null;
     finalizeCurrentStream(ctx().turnOutput?.stopReason);
