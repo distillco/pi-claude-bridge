@@ -37673,6 +37673,9 @@ var QueryContext = class {
   pendingToolEmissions = /* @__PURE__ */ new Map();
   // Query-scoped (fully isolated per query)
   activeQuery = null;
+  // Set while this context's SDK query runs. Resolves every waiting tool call
+  // with `result` and ends the query; called on abort and on session_shutdown.
+  endQuery = null;
   currentPiStream = null;
   latestCursor = 0;
   pendingToolCalls = /* @__PURE__ */ new Map();
@@ -54466,20 +54469,21 @@ function streamForSession(model, context, options) {
     activeStreamIdleWatchdogs.set(abortCtx, streamIdleWatchdog);
     streamIdleWatchdog.refresh();
   }
-  const onAbort = () => {
+  const endQuery = (reason, result) => {
+    if (abortCtx.endQuery === endQuery) abortCtx.endQuery = null;
     wasAborted = true;
     if (abortCtx.session) abortCtx.session = { ...abortCtx.session, needsRebuild: true, forceRotate: true };
     abortCtx.activeQuery = null;
     abortCtx.deferredUserMessages = [];
-    reportToolResultMismatch(abortCtx, "abort", cwd, { forceRotate: true });
-    for (const pending of abortCtx.pendingToolCalls.values()) {
-      pending.resolve({ content: [{ type: "text", text: "Operation aborted" }] });
-    }
+    reportToolResultMismatch(abortCtx, reason, cwd, { forceRotate: true });
+    for (const pending of abortCtx.pendingToolCalls.values()) pending.resolve(result);
     abortCtx.pendingToolCalls.clear();
     abortCtx.pendingResults.clear();
     abortCtx.pendingToolEmissions.clear();
     requestAbort();
   };
+  abortCtx.endQuery = endQuery;
+  const onAbort = () => endQuery("abort", { content: [{ type: "text", text: "Operation aborted" }] });
   if (options?.signal) {
     if (options.signal.aborted) onAbort();
     else options.signal.addEventListener("abort", onAbort, { once: true });
@@ -54572,6 +54576,7 @@ function streamForSession(model, context, options) {
   }).finally(() => {
     streamIdleWatchdog?.dispose();
     activeStreamIdleWatchdogs.delete(abortCtx);
+    if (abortCtx.endQuery === endQuery) abortCtx.endQuery = null;
     if (options?.signal) options.signal.removeEventListener("abort", onAbort);
     if (ctx().activeQuery === sdkQuery || ctx().activeQuery === null) {
       reportToolResultMismatch(ctx(), "query teardown", cwd, { forceRotate: wasAborted || options?.signal?.aborted || streamIdleTimedOut });
@@ -54682,6 +54687,7 @@ function index_default(pi) {
     if (event.reason === "startup" || event.reason === "resume") restoreSharedSessionFromPi(ctx2);
   });
   on2("session_shutdown", (_event, host) => {
+    ctx().endQuery?.("session_shutdown", { content: [{ type: "text", text: "Session shut down" }], isError: true });
     clearSession("session_shutdown");
     forgetSessionContext(host.sessionManager.getSessionId());
   });
