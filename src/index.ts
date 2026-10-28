@@ -2076,11 +2076,14 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 	// Capture this query's context for abort handling.
 	const abortCtx = ctx();
 
+	// A deferred-message continuation runs its own SDK query after sdkQuery has
+	// finished, so an abort must stop whichever of the two is running.
+	let runningQuery = sdkQuery;
 	const requestAbort = () => {
 		// interrupt() asks the CLI to stop gracefully; close() kills it immediately.
 		// Both are needed — interrupt alone lets the current API call finish.
-		void sdkQuery.interrupt().catch(() => {});
-		try { sdkQuery.close(); } catch {}
+		void runningQuery.interrupt().catch(() => {});
+		try { runningQuery.close(); } catch {}
 	};
 	const streamIdleTimeoutMs = streamIdleTimeoutMsFromEnv();
 	const streamIdleWatchdog = streamIdleTimeoutMs > 0
@@ -2134,21 +2137,25 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 		activeStreamIdleWatchdogs.set(abortCtx, streamIdleWatchdog);
 		streamIdleWatchdog.refresh();
 	}
-	const onAbort = () => {
+	const endQuery = (reason: string, result: McpResult) => {
+		if (abortCtx.endQuery === endQuery) abortCtx.endQuery = null;
 		wasAborted = true;
-    // AbortSignal listeners run in the caller's async context. Mutate only the
-    // captured query, and release it synchronously before a caller can retry.
+    // AbortSignal listeners and lifecycle handlers run in the caller's async
+    // context. Mutate only the captured query, and release it synchronously
+    // before a caller can retry.
     if (abortCtx.session) abortCtx.session = { ...abortCtx.session, needsRebuild: true, forceRotate: true };
     abortCtx.activeQuery = null;
 		// Prevent canceled messages from being replayed in this session.
 		abortCtx.deferredUserMessages = [];
-		reportToolResultMismatch(abortCtx, "abort", cwd, { forceRotate: true });
-		for (const pending of abortCtx.pendingToolCalls.values()) { pending.resolve({ content: [{ type: "text", text: "Operation aborted" }] }); }
+		reportToolResultMismatch(abortCtx, reason, cwd, { forceRotate: true });
+		for (const pending of abortCtx.pendingToolCalls.values()) pending.resolve(result);
 		abortCtx.pendingToolCalls.clear();
 		abortCtx.pendingResults.clear();
     abortCtx.pendingToolEmissions.clear();
 		requestAbort();
 	};
+	abortCtx.endQuery = endQuery;
+	const onAbort = () => endQuery("abort", { content: [{ type: "text", text: "Operation aborted" }] });
 	if (options?.signal) {
 		if (options.signal.aborted) onAbort();
 		else options.signal.addEventListener("abort", onAbort, { once: true });
@@ -2210,6 +2217,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 					const contOptions = { ...queryOptions, resume: resumeId, ...makeCliDebugOptions("continuation") };
 					const contQuery = query({ prompt: steerPrompt, options: contOptions });
 					ctx().activeQuery = contQuery;
+					runningQuery = contQuery;
 
 					debug(`provider: continuation query, model=${model.id}, resume=${resumeId.slice(0, 8)}, prompt=${steerPrompt.slice(0, 60)}`);
 
@@ -2261,6 +2269,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 		.finally(() => {
 			streamIdleWatchdog?.dispose();
 			activeStreamIdleWatchdogs.delete(abortCtx);
+			if (abortCtx.endQuery === endQuery) abortCtx.endQuery = null;
 			if (options?.signal) options.signal.removeEventListener("abort", onAbort);
 			if (ctx().activeQuery === sdkQuery || ctx().activeQuery === null) {
 				reportToolResultMismatch(ctx(), "query teardown", cwd, { forceRotate: wasAborted || options?.signal?.aborted || streamIdleTimedOut });
@@ -2392,6 +2401,9 @@ export default function (pi: ExtensionAPI) {
 		if (event.reason === "startup" || event.reason === "resume") restoreSharedSessionFromPi(ctx);
 	});
 	on("session_shutdown", (_event, host) => {
+    // A tool call left waiting keeps the SDK sending progress heartbeats with
+    // no way to finish, so answer it and end the query before the context goes.
+    ctx().endQuery?.("session_shutdown", { content: [{ type: "text", text: "Session shut down" }], isError: true });
     clearSession("session_shutdown");
     forgetSessionContext(host.sessionManager.getSessionId());
   });

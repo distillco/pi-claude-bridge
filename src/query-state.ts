@@ -114,6 +114,9 @@ export class QueryContext {
   pendingToolEmissions = new Map<string, TurnToolCallRecord>();
 	// Query-scoped (fully isolated per query)
 	activeQuery: unknown | null = null;
+	// Set while this context's SDK query runs. Resolves every waiting tool call
+	// with `result` and ends the query; called on abort and on session_shutdown.
+	endQuery: ((reason: string, result: McpResult) => void) | null = null;
 	currentPiStream: AssistantMessageEventStream | null = null;
 	latestCursor = 0;
 	pendingToolCalls = new Map<string, PendingToolCall>();
