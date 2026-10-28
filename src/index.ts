@@ -1670,9 +1670,13 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
 		// and the MCP handlers stay blocked until real tool results are delivered.
 		// Without this fallback, Claude Code can continue internally with empty MCP
 		// results and Pi only sees the real outputs one render cycle later.
+		// Claude Code also yields one assistant message per content block, with a
+		// null stop_reason until the API message ends. Closing on one of those
+		// would hand Pi the first tool call alone and serialize parallel calls, so
+		// those wait for message_stop.
 		if (appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi)) {
 			c.turnSawToolCall = true;
-      finishToolUseStream();
+			if (assistantMsg.stop_reason !== null) finishToolUseStream();
 		}
 		return;
 	}

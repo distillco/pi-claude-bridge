@@ -88,6 +88,39 @@ describe("assistant tool-use boundary fallback", () => {
 		assert.deepEqual(events.map((event) => event.type), ["start", "toolcall_start", "toolcall_end", "done", "stream_end"]);
 	});
 
+	it("keeps parallel tool calls in one Pi message when Claude Code yields an assistant message per block", () => {
+		const c = ctx();
+		c.resetTurnState(model);
+		const events = installFakeStream();
+		const names = new Map([["mcp__custom-tools__Agent", "Agent"]]);
+		const ids = ["toolu_a", "toolu_b", "toolu_c"];
+		const stream = (event) => processStreamEvent({ type: "stream_event", event }, names, model);
+
+		// Event order recorded from Claude Code 2.1.312: each block's assistant
+		// message arrives before its content_block_stop, with stop_reason null.
+		stream({ type: "message_start", message: { usage: { input_tokens: 1, output_tokens: 0 } } });
+		ids.forEach((id, index) => {
+			const input = { prompt: `task ${index}` };
+			stream({ type: "content_block_start", index, content_block: { type: "tool_use", id, name: "mcp__custom-tools__Agent", input: {} } });
+			stream({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } });
+			processAssistantMessage({
+				type: "assistant",
+				message: { id: "msg_1", stop_reason: null, content: [{ type: "tool_use", id, name: "mcp__custom-tools__Agent", input }] },
+			}, model, names);
+			assert.notEqual(c.currentPiStream, null, `block ${index} must not end the Pi message`);
+			stream({ type: "content_block_stop", index });
+		});
+		stream({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 32 } });
+		stream({ type: "message_stop" });
+
+		assert.equal(c.currentPiStream, null);
+		assert.equal(events.filter((event) => event.type === "done").length, 1);
+		const done = events.find((event) => event.type === "done");
+		assert.equal(done.reason, "toolUse");
+		assert.deepEqual(done.message.content.filter((b) => b.type === "toolCall").map((b) => b.id), ids);
+		assert.equal(c.pendingToolEmissions.size, 0);
+	});
+
 	it("queues late tool-use ids without mutating the output Pi already consumed", () => {
 		const c = ctx();
 		c.resetTurnState(model);

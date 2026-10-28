@@ -54107,7 +54107,7 @@ function processAssistantMessage(message, model, customToolNameToPi) {
   if (c.turnSawStreamEvent) {
     if (appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi)) {
       c.turnSawToolCall = true;
-      finishToolUseStream();
+      if (assistantMsg.stop_reason !== null) finishToolUseStream();
     }
     return;
   }
