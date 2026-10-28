@@ -54489,13 +54489,14 @@ function streamForSession(model, context, options) {
     if (options.signal.aborted) onAbort();
     else options.signal.addEventListener("abort", onAbort, { once: true });
   }
+  const queryStopped = () => streamIdleTimedOut || ctx().handledTerminalError || wasAborted || Boolean(options?.signal?.aborted);
   const finishIfStopped = () => {
+    if (!queryStopped()) return false;
     if (streamIdleTimedOut || ctx().handledTerminalError) {
       abortCtx.deferredUserMessages = [];
       debug("provider: terminal error already surfaced; skipping normal completion");
       return true;
     }
-    if (!wasAborted && !options?.signal?.aborted) return false;
     if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
     ctx().deferredUserMessages = [];
     debug(`provider: abort detected, marked bridgeSession().session needsRebuild + forceRotate`);
@@ -54539,7 +54540,7 @@ function streamForSession(model, context, options) {
         debug(`provider: continuation query, model=${model.id}, resume=${resumeId.slice(0, 8)}, prompt=${steerPrompt.slice(0, 60)}`);
         try {
           const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted);
-          if (streamIdleTimedOut || ctx().handledTerminalError || wasAborted) break;
+          if (queryStopped()) break;
           const sid = contSid ?? bridgeSession().session?.sessionId;
           if (sid) {
             bridgeSession().session = { sessionId: sid, cursor: bridgeSession().session?.cursor ?? 0, cwd };

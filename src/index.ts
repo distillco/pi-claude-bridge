@@ -2162,16 +2162,19 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 		else options.signal.addEventListener("abort", onAbort, { once: true });
 	}
 
+	const queryStopped = (): boolean =>
+		streamIdleTimedOut || ctx().handledTerminalError || wasAborted || Boolean(options?.signal?.aborted);
+
 	// Returns true when a timeout, terminal error, or abort stopped the query,
 	// and for an abort ends the Pi stream as aborted. Checked after sdkQuery
 	// finishes and again after its continuations finish.
 	const finishIfStopped = (): boolean => {
+		if (!queryStopped()) return false;
 		if (streamIdleTimedOut || ctx().handledTerminalError) {
 			abortCtx.deferredUserMessages = [];
 			debug("provider: terminal error already surfaced; skipping normal completion");
 			return true;
 		}
-		if (!wasAborted && !options?.signal?.aborted) return false;
 		if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
 		ctx().deferredUserMessages = [];
 		debug(`provider: abort detected, marked bridgeSession().session needsRebuild + forceRotate`);
@@ -2230,9 +2233,9 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 
 					try {
 						const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted);
-						// A stop already marked the session for rotation or cleared it, so
-						// capturing it here would undo that.
-						if (streamIdleTimedOut || ctx().handledTerminalError || wasAborted) break;
+						// An idle timeout or abort marked the session for rotation, and an
+						// extra-usage error cleared it; capturing it here would undo either.
+						if (queryStopped()) break;
 						const sid = contSid ?? bridgeSession().session?.sessionId;
 						if (sid) {
 							bridgeSession().session = { sessionId: sid, cursor: bridgeSession().session?.cursor ?? 0, cwd };

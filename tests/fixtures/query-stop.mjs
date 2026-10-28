@@ -114,7 +114,12 @@ test("an abort during a continuation ends the Pi stream as aborted", { timeout: 
   delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
 });
 
-test("the stream idle watchdog times out a continuation that sends nothing", { timeout: 5000 }, async () => {
+// Waits for the turn's consumer to finish; its .finally clears endQuery.
+async function consumerDone(queryCtx) {
+  while (queryCtx.endQuery) await new Promise(resolve => setImmediate(resolve));
+}
+
+test("the stream idle watchdog times out a continuation that sends nothing, and the session still rotates", { timeout: 5000 }, async () => {
   const previousTimeout = process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT;
   process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT = "50ms";
   let started;
@@ -132,9 +137,22 @@ test("the stream idle watchdog times out a continuation that sends nothing", { t
   assert.equal(result.stopReason, "error");
   assert.equal(result.rateLimitType, "stream_idle");
   assert.equal(started.cont.closed, true, "the timeout must end the continuation query");
-  // Let the continuation's consumer finish, since that is where it captures the session.
-  for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  await consumerDone(started.queryCtx);
   assert.equal(started.queryCtx.session.needsRebuild, true, "the timeout must mark the session for rebuild");
   assert.equal(started.queryCtx.session.forceRotate, true, "the timeout must force a session rotation");
+  delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
+});
+
+test("an extra-usage error during a continuation leaves the session cleared", { timeout: 5000 }, async () => {
+  const { turn, cont, queryCtx } = await startContinuation("continuation-extra-usage");
+  // The continuation reports its own session, which the capture would otherwise restore.
+  cont.push({ type: "system", subtype: "init", session_id: "continuation-extra-usage-cont" });
+  cont.push({ type: "result", subtype: "error_during_execution", errors: ["Extra usage is required for this request"] });
+  cont.close();
+
+  const result = await turn.result();
+  assert.equal(result.stopReason, "error");
+  await consumerDone(queryCtx);
+  assert.equal(queryCtx.session, null, "the extra-usage error must clear the session");
   delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
 });
