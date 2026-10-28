@@ -54411,11 +54411,12 @@ function streamForSession(model, context, options) {
   const sdkQuery = DQt({ prompt, options: queryOptions });
   ctx().activeQuery = sdkQuery;
   const abortCtx = ctx();
+  let runningQuery = sdkQuery;
   const requestAbort = () => {
-    void sdkQuery.interrupt().catch(() => {
+    void runningQuery.interrupt().catch(() => {
     });
     try {
-      sdkQuery.close();
+      runningQuery.close();
     } catch {
     }
   };
@@ -54531,6 +54532,7 @@ function streamForSession(model, context, options) {
         const contOptions = { ...queryOptions, resume: resumeId, ...makeCliDebugOptions("continuation") };
         const contQuery = DQt({ prompt: steerPrompt, options: contOptions });
         ctx().activeQuery = contQuery;
+        runningQuery = contQuery;
         debug(`provider: continuation query, model=${model.id}, resume=${resumeId.slice(0, 8)}, prompt=${steerPrompt.slice(0, 60)}`);
         try {
           const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted);

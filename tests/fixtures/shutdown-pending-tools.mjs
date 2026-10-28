@@ -62,3 +62,32 @@ test("session_shutdown answers a held tool call with an error and ends the query
   assert.equal(q.closed, true, "shutdown must end the SDK query");
   delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
 });
+
+test("session_shutdown ends a deferred-message continuation query", { timeout: 5000 }, async () => {
+  const handlers = new Map();
+  register({ on: (name, fn) => handlers.set(name, fn), registerCommand() {}, registerProvider() {} });
+  const host = { cwd: scratch, ui: { notify() {} }, sessionManager: { getSessionId: () => "continuation" } };
+  await handlers.get("session_start")({ reason: "startup" }, host);
+
+  const turn = streamClaudeAgentSdk(model, { messages: [{ role: "user", content: "start", timestamp: Date.now() }], tools }, { sessionId: "continuation", cwd: scratch });
+  const first = queries.at(-1);
+  const queryCtx = runWithSessionContext("continuation", () => ctx());
+  // A deferred message plus a resumable session id makes the bridge replay it as a continuation query.
+  first.push({ type: "system", subtype: "init", session_id: "continuation-session" });
+  queryCtx.deferredUserMessages.push("follow up");
+  first.close();
+  while (queries.at(-1) === first) await new Promise(resolve => setImmediate(resolve));
+  const cont = queries.at(-1);
+  assert.equal(cont.input.prompt, "follow up");
+
+  cont.push({ type: "assistant", message: { content: [{ type: "tool_use", id: "held-cont", name: "mcp__custom-tools__bash", input: { command: "echo cont" } }] } });
+  await turn.result();
+  const held = cont.input.options.mcpServers["custom-tools"].tools[0].handler({ command: "echo cont" });
+  assert.equal(queryCtx.pendingToolCalls.size, 1);
+
+  await handlers.get("session_shutdown")({}, host);
+
+  assert.deepEqual(await held, { content: [{ type: "text", text: "Session shut down" }], isError: true });
+  assert.equal(cont.closed, true, "shutdown must end the continuation query");
+  delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
+});

@@ -2076,11 +2076,14 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 	// Capture this query's context for abort handling.
 	const abortCtx = ctx();
 
+	// A deferred-message continuation runs its own SDK query after sdkQuery has
+	// finished, so an abort must stop whichever of the two is running.
+	let runningQuery = sdkQuery;
 	const requestAbort = () => {
 		// interrupt() asks the CLI to stop gracefully; close() kills it immediately.
 		// Both are needed — interrupt alone lets the current API call finish.
-		void sdkQuery.interrupt().catch(() => {});
-		try { sdkQuery.close(); } catch {}
+		void runningQuery.interrupt().catch(() => {});
+		try { runningQuery.close(); } catch {}
 	};
 	const streamIdleTimeoutMs = streamIdleTimeoutMsFromEnv();
 	const streamIdleWatchdog = streamIdleTimeoutMs > 0
@@ -2214,6 +2217,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 					const contOptions = { ...queryOptions, resume: resumeId, ...makeCliDebugOptions("continuation") };
 					const contQuery = query({ prompt: steerPrompt, options: contOptions });
 					ctx().activeQuery = contQuery;
+					runningQuery = contQuery;
 
 					debug(`provider: continuation query, model=${model.id}, resume=${resumeId.slice(0, 8)}, prompt=${steerPrompt.slice(0, 60)}`);
 
