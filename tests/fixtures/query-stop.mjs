@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const scratch = mkdtempSync(join(tmpdir(), "bridge-shutdown-"));
+const scratch = mkdtempSync(join(tmpdir(), "bridge-query-stop-"));
 process.env.CLAUDE_CONFIG_DIR = join(scratch, "claude");
 process.env.CLAUDE_BRIDGE_DIAG_PATH = join(scratch, "diag.log");
 process.env.CLAUDE_BRIDGE_DEBUG_PATH = join(scratch, "debug.log");
@@ -63,23 +63,32 @@ test("session_shutdown answers a held tool call with an error and ends the query
   delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
 });
 
-test("session_shutdown ends a deferred-message continuation query", { timeout: 5000 }, async () => {
+// Starts a turn whose first query ends with a deferred message queued, so the
+// bridge replays it as a continuation query.
+async function startContinuation(sessionId, signal) {
   const handlers = new Map();
   register({ on: (name, fn) => handlers.set(name, fn), registerCommand() {}, registerProvider() {} });
-  const host = { cwd: scratch, ui: { notify() {} }, sessionManager: { getSessionId: () => "continuation" } };
+  const host = { cwd: scratch, ui: { notify() {} }, sessionManager: { getSessionId: () => sessionId } };
   await handlers.get("session_start")({ reason: "startup" }, host);
 
-  const turn = streamClaudeAgentSdk(model, { messages: [{ role: "user", content: "start", timestamp: Date.now() }], tools }, { sessionId: "continuation", cwd: scratch });
+  const turn = streamClaudeAgentSdk(model, { messages: [{ role: "user", content: "start", timestamp: Date.now() }], tools }, { sessionId, cwd: scratch, signal });
   const first = queries.at(-1);
-  const queryCtx = runWithSessionContext("continuation", () => ctx());
-  // A deferred message plus a resumable session id makes the bridge replay it as a continuation query.
-  first.push({ type: "system", subtype: "init", session_id: "continuation-session" });
+  const queryCtx = runWithSessionContext(sessionId, () => ctx());
+  first.push({ type: "system", subtype: "init", session_id: `${sessionId}-session` });
+  // The text starts the turn, and the message after it disarms the idle
+  // watchdog, as the SDK's closing messages do in a real query.
+  first.push({ type: "assistant", message: { content: [{ type: "text", text: "first answer" }] } });
+  first.push({ type: "system", subtype: "status" });
   queryCtx.deferredUserMessages.push("follow up");
   first.close();
   while (queries.at(-1) === first) await new Promise(resolve => setImmediate(resolve));
   const cont = queries.at(-1);
   assert.equal(cont.input.prompt, "follow up");
+  return { handlers, host, turn, cont, queryCtx };
+}
 
+test("session_shutdown ends a deferred-message continuation query", { timeout: 5000 }, async () => {
+  const { handlers, host, turn, cont, queryCtx } = await startContinuation("continuation");
   cont.push({ type: "assistant", message: { content: [{ type: "tool_use", id: "held-cont", name: "mcp__custom-tools__bash", input: { command: "echo cont" } }] } });
   await turn.result();
   const held = cont.input.options.mcpServers["custom-tools"].tools[0].handler({ command: "echo cont" });
@@ -89,5 +98,61 @@ test("session_shutdown ends a deferred-message continuation query", { timeout: 5
 
   assert.deepEqual(await held, { content: [{ type: "text", text: "Session shut down" }], isError: true });
   assert.equal(cont.closed, true, "shutdown must end the continuation query");
+  delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
+});
+
+test("an abort during a continuation ends the Pi stream as aborted", { timeout: 5000 }, async () => {
+  const controller = new AbortController();
+  const { turn, cont } = await startContinuation("continuation-abort", controller.signal);
+
+  controller.abort();
+
+  const result = await turn.result();
+  assert.equal(result.stopReason, "aborted");
+  assert.equal(result.errorMessage, "Operation aborted");
+  assert.equal(cont.closed, true, "abort must end the continuation query");
+  delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
+});
+
+// Waits for the turn's consumer to finish; its .finally clears endQuery.
+async function consumerDone(queryCtx) {
+  while (queryCtx.endQuery) await new Promise(resolve => setImmediate(resolve));
+}
+
+test("the stream idle watchdog times out a continuation that sends nothing, and the session still rotates", { timeout: 5000 }, async () => {
+  const previousTimeout = process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT;
+  process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT = "50ms";
+  let started;
+  try { started = await startContinuation("continuation-idle"); }
+  finally {
+    if (previousTimeout === undefined) delete process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT;
+    else process.env.CLAUDE_BRIDGE_STREAM_IDLE_TIMEOUT = previousTimeout;
+  }
+
+  // The watchdog's timer is unref'd, so hold the event loop open until it fires.
+  const keepAlive = setTimeout(() => {}, 5000);
+  let result;
+  try { result = await started.turn.result(); }
+  finally { clearTimeout(keepAlive); }
+  assert.equal(result.stopReason, "error");
+  assert.equal(result.rateLimitType, "stream_idle");
+  assert.equal(started.cont.closed, true, "the timeout must end the continuation query");
+  await consumerDone(started.queryCtx);
+  assert.equal(started.queryCtx.session.needsRebuild, true, "the timeout must mark the session for rebuild");
+  assert.equal(started.queryCtx.session.forceRotate, true, "the timeout must force a session rotation");
+  delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
+});
+
+test("an extra-usage error during a continuation leaves the session cleared", { timeout: 5000 }, async () => {
+  const { turn, cont, queryCtx } = await startContinuation("continuation-extra-usage");
+  // The continuation reports its own session, which the capture would otherwise restore.
+  cont.push({ type: "system", subtype: "init", session_id: "continuation-extra-usage-cont" });
+  cont.push({ type: "result", subtype: "error_during_execution", errors: ["Extra usage is required for this request"] });
+  cont.close();
+
+  const result = await turn.result();
+  assert.equal(result.stopReason, "error");
+  await consumerDone(queryCtx);
+  assert.equal(queryCtx.session, null, "the extra-usage error must clear the session");
   delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
 });

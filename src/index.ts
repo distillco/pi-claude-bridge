@@ -1664,15 +1664,16 @@ export function processAssistantMessage(message: SDKMessage, model: Model<any>, 
   }
 	updateTurnOutputModel(assistantMsg.model);
 	if (c.turnSawStreamEvent) {
-		// Claude Agent SDK can yield the completed assistant message before (or
-		// instead of) a stream_event message_stop for a tool-use turn. Treat that
-		// assistant message as a hard turn boundary so Pi executes the tool calls
-		// and the MCP handlers stay blocked until real tool results are delivered.
-		// Without this fallback, Claude Code can continue internally with empty MCP
-		// results and Pi only sees the real outputs one render cycle later.
+		// While streaming, Claude Code yields an assistant message per content block.
+		// This adds any tool_use blocks the stream events missed. It does not end the
+		// Pi message on those: their stop_reason is null until the API message ends,
+		// and closing early would hand Pi one tool call at a time and serialize
+		// parallel calls. message_stop ends the turn. The stop_reason check closes
+		// only on an assistant message that carries a stop reason, which current
+		// Claude Code does not send on streamed turns.
 		if (appendMissingToolUsesFromAssistant(assistantMsg, model, customToolNameToPi)) {
 			c.turnSawToolCall = true;
-      finishToolUseStream();
+			if (assistantMsg.stop_reason !== null) finishToolUseStream();
 		}
 		return;
 	}
@@ -2077,7 +2078,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 	const abortCtx = ctx();
 
 	// A deferred-message continuation runs its own SDK query after sdkQuery has
-	// finished, so an abort must stop whichever of the two is running.
+	// finished, so an abort or idle timeout must act on whichever one is running.
 	let runningQuery = sdkQuery;
 	const requestAbort = () => {
 		// interrupt() asks the CLI to stop gracefully; close() kills it immediately.
@@ -2096,7 +2097,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 				turnStarted: abortCtx.turnStarted,
 			}),
 			onTimeout: ({ idleMs, timeoutMs }) => {
-				if (streamIdleTimedOut || wasAborted || options?.signal?.aborted || abortCtx.activeQuery !== sdkQuery) return;
+				if (streamIdleTimedOut || wasAborted || options?.signal?.aborted || abortCtx.activeQuery !== runningQuery) return;
 				streamIdleTimedOut = true;
 				abortCtx.deferredUserMessages = [];
 				abortCtx.handledTerminalError = true;
@@ -2161,31 +2162,38 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 		else options.signal.addEventListener("abort", onAbort, { once: true });
 	}
 
+	const queryStopped = (): boolean =>
+		streamIdleTimedOut || ctx().handledTerminalError || wasAborted || Boolean(options?.signal?.aborted);
+
+	// Returns true when a timeout, terminal error, or abort stopped the query,
+	// and for an abort ends the Pi stream as aborted. Checked after sdkQuery
+	// finishes and again after its continuations finish.
+	const finishIfStopped = (): boolean => {
+		if (!queryStopped()) return false;
+		if (streamIdleTimedOut || ctx().handledTerminalError) {
+			abortCtx.deferredUserMessages = [];
+			debug("provider: terminal error already surfaced; skipping normal completion");
+			return true;
+		}
+		if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
+		ctx().deferredUserMessages = [];
+		debug(`provider: abort detected, marked bridgeSession().session needsRebuild + forceRotate`);
+		if (ctx().turnOutput) {
+			ctx().turnOutput.stopReason = "aborted";
+			ctx().turnOutput.errorMessage = "Operation aborted";
+		}
+		ctx().activeQuery = null;
+		ctx().currentPiStream?.push({ type: "error", reason: "aborted", error: ctx().turnOutput! });
+		ctx().currentPiStream?.end();
+		ctx().currentPiStream = null;
+		return true;
+	};
+
 	// Background consumer — runs until query ends
 	consumeQuery(sdkQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted)
 		.then(async ({ capturedSessionId }) => {
 			debug(`provider: consumeQuery completed, stopReason=${ctx().turnOutput?.stopReason}, error=${ctx().turnOutput?.errorMessage}, aborted=${wasAborted}`);
-			if (streamIdleTimedOut || ctx().handledTerminalError) {
-				abortCtx.deferredUserMessages = [];
-				debug("provider: terminal error already surfaced; skipping normal completion");
-				return;
-			}
-
-			// --- Abort detection in normal completion path ---
-			if (wasAborted || options?.signal?.aborted) {
-				if (bridgeSession().session) bridgeSession().session = { ...bridgeSession().session, needsRebuild: true, forceRotate: true };
-				ctx().deferredUserMessages = [];
-				debug(`provider: abort detected, marked bridgeSession().session needsRebuild + forceRotate`);
-				if (ctx().turnOutput) {
-					ctx().turnOutput.stopReason = "aborted";
-					ctx().turnOutput.errorMessage = "Operation aborted";
-				}
-				ctx().activeQuery = null;
-				ctx().currentPiStream?.push({ type: "error", reason: "aborted", error: ctx().turnOutput! });
-				ctx().currentPiStream?.end();
-				ctx().currentPiStream = null;
-				return;
-			}
+			if (finishIfStopped()) return;
 
 			// --- Capture session ID ---
 			const sessionId = capturedSessionId ?? bridgeSession().session?.sessionId;
@@ -2218,11 +2226,16 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 					const contQuery = query({ prompt: steerPrompt, options: contOptions });
 					ctx().activeQuery = contQuery;
 					runningQuery = contQuery;
+					// The first query's turn already started, which disarmed the watchdog.
+					activeStreamIdleWatchdogs.get(abortCtx)?.refresh();
 
 					debug(`provider: continuation query, model=${model.id}, resume=${resumeId.slice(0, 8)}, prompt=${steerPrompt.slice(0, 60)}`);
 
 					try {
 						const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted);
+						// An idle timeout or abort marked the session for rotation, and an
+						// extra-usage error cleared it; capturing it here would undo either.
+						if (queryStopped()) break;
 						const sid = contSid ?? bridgeSession().session?.sessionId;
 						if (sid) {
 							bridgeSession().session = { sessionId: sid, cursor: bridgeSession().session?.cursor ?? 0, cwd };
@@ -2238,6 +2251,7 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 				// Guarantees restoration even if contQuery() throws synchronously
 				ctx().activeQuery = sdkQuery;
 			}
+			if (finishIfStopped()) return;
 
       reportToolResultMismatch(ctx(), "query completion", cwd);
       ctx().activeQuery = null;
