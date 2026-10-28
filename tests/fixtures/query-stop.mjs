@@ -132,5 +132,9 @@ test("the stream idle watchdog times out a continuation that sends nothing", { t
   assert.equal(result.stopReason, "error");
   assert.equal(result.rateLimitType, "stream_idle");
   assert.equal(started.cont.closed, true, "the timeout must end the continuation query");
+  // Let the continuation's consumer finish, since that is where it captures the session.
+  for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(started.queryCtx.session.needsRebuild, true, "the timeout must mark the session for rebuild");
+  assert.equal(started.queryCtx.session.forceRotate, true, "the timeout must force a session rotation");
   delete globalThis[Symbol.for("claude-bridge:activeStreamSimple")];
 });

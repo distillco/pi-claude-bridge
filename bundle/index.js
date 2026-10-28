@@ -54539,6 +54539,7 @@ function streamForSession(model, context, options) {
         debug(`provider: continuation query, model=${model.id}, resume=${resumeId.slice(0, 8)}, prompt=${steerPrompt.slice(0, 60)}`);
         try {
           const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted);
+          if (streamIdleTimedOut || ctx().handledTerminalError || wasAborted) break;
           const sid = contSid ?? bridgeSession().session?.sessionId;
           if (sid) {
             bridgeSession().session = { sessionId: sid, cursor: bridgeSession().session?.cursor ?? 0, cwd };

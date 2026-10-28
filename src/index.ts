@@ -2230,6 +2230,9 @@ function streamForSession(model: Model<any>, context: Context, options?: SimpleS
 
 					try {
 						const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted);
+						// A stop already marked the session for rotation or cleared it, so
+						// capturing it here would undo that.
+						if (streamIdleTimedOut || ctx().handledTerminalError || wasAborted) break;
 						const sid = contSid ?? bridgeSession().session?.sessionId;
 						if (sid) {
 							bridgeSession().session = { sessionId: sid, cursor: bridgeSession().session?.cursor ?? 0, cwd };
