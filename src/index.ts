@@ -11,7 +11,7 @@ import { resolve as pathResolve } from "path";
 import { homedir } from "os";
 import { delimiter, dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages, toLegacyContext } from "./convert.js";
-import { FABLE_FALLBACK_MODEL_ID, FABLE_MODEL_ID, buildModels, fallbackModelForPrimaryModel } from "./models.js";
+import { buildModels, fallbackModelForPrimaryModel, modelDisplayName } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, extractSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, extractInjectedUserMessages, takeSteeredInput, withSteeredUserText, type McpResult } from "./extract-tool-results.js";
@@ -1784,9 +1784,9 @@ async function consumeQuery(
 					const fallbackModel = (message as any).fallback_model;
 					updateTurnOutputModel(fallbackModel);
 					debug("consumeQuery: model_refusal_fallback", JSON.stringify({ originalModel, fallbackModel }));
-					if (fallbackModelForPrimaryModel(originalModel) === fallbackModel && fallbackModel === FABLE_FALLBACK_MODEL_ID) {
-						const originalName = originalModel === FABLE_MODEL_ID ? "Fable 5" : "Fable 5.1";
-						safeNotify(`Claude bridge switched ${originalName} to Opus 4.8 after Claude Code safety fallback.`, "info");
+					// Claude Code picks the refusal fallback per category (Opus 4.8 or Opus 5), not from fallbackModel.
+					if (fallbackModelForPrimaryModel(originalModel) && typeof fallbackModel === "string") {
+						safeNotify(`Claude bridge switched ${modelDisplayName(originalModel)} to ${modelDisplayName(fallbackModel)} after Claude Code safety fallback.`, "info");
 					}
 				}
 				break;

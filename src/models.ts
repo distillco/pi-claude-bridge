@@ -6,13 +6,17 @@ export const FABLE_MODEL_ID = "claude-fable-5";
 export const FABLE_FALLBACK_MODEL_ID = "claude-opus-4-8";
 
 export const FABLE_5_1_MODEL_ID = "claude-fable-5-1";
+export const FABLE_5_2_MODEL_ID = "claude-fable-5-2";
+
+const FABLE_MODEL_IDS = new Set([FABLE_5_2_MODEL_ID, FABLE_5_1_MODEL_ID, FABLE_MODEL_ID]);
 
 export function fallbackModelForPrimaryModel(modelId: string): string | undefined {
-	return modelId === FABLE_MODEL_ID || modelId === FABLE_5_1_MODEL_ID ? FABLE_FALLBACK_MODEL_ID : undefined;
+	return FABLE_MODEL_IDS.has(modelId) ? FABLE_FALLBACK_MODEL_ID : undefined;
 }
 
 export const MODEL_IDS_IN_ORDER = [
-	"claude-fable-5-1",
+	FABLE_5_2_MODEL_ID,
+	FABLE_5_1_MODEL_ID,
 	FABLE_MODEL_ID,
 	"claude-opus-5-5",
 	"claude-opus-5",
@@ -37,8 +41,17 @@ type BridgeModelMetadata = {
 };
 
 const FALLBACK_MODELS: Record<string, BridgeModelMetadata> = {
-	"claude-fable-5-1": {
-		id: "claude-fable-5-1",
+	[FABLE_5_2_MODEL_ID]: {
+		id: FABLE_5_2_MODEL_ID,
+		name: "Claude Fable 5.2",
+		reasoning: true,
+		thinkingLevelMap: { xhigh: "xhigh" },
+		input: ["text", "image"],
+		contextWindow: 1000000,
+		maxTokens: 128000,
+	},
+	[FABLE_5_1_MODEL_ID]: {
+		id: FABLE_5_1_MODEL_ID,
 		name: "Claude Fable 5.1",
 		reasoning: true,
 		thinkingLevelMap: { xhigh: "xhigh" },
@@ -110,6 +123,11 @@ const FALLBACK_MODELS: Record<string, BridgeModelMetadata> = {
 		maxTokens: 128000,
 	},
 };
+
+/** Short display name for notices, e.g. "Fable 5.2"; unknown ids pass through. */
+export function modelDisplayName(modelId: string): string {
+	return FALLBACK_MODELS[modelId]?.name.replace(/^Claude /, "") ?? modelId;
+}
 
 // Project pi-ai's model entries down to the fields pi's registerProvider expects,
 // keep MODEL_IDS_IN_ORDER ordering, and fill bridge-owned future IDs when pi-ai
