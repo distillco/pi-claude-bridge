@@ -1,0 +1,31 @@
+bundle/index.js
+  s_0f0b1d6469aae2::t_2a80f755649c3d 37602,37604,37612-37618,37688-37689,54259-54265,54305-54308,54701-54706
+package-lock.json
+  s_0f0b1d6469aae2::t_915af4bd9f65a7 3,9
+package.json
+  s_0f0b1d6469aae2::t_3dbf65ee34eb54 3
+src/extract-tool-results.ts
+  s_0f0b1d6469aae2::t_f3d03ca815c304 58-62,64-65,67,75-85
+src/index.ts
+  s_0f0b1d6469aae2::t_83db2cb0778774 17,1861-1868,1871,1920-1923,2419-2426
+src/query-state.ts
+  s_0f0b1d6469aae2::t_35a8938a77d6c0 129-130
+tests/unit-steered-tool-result.mjs
+  s_0f0b1d6469aae2::t_3f97a71f301224 3,8-9,16,20,25,28,31-40,43-58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e8c70ecd4b1b89cab14ffce9f66518bf90197f13",
+  "prompts": {},
+  "sessions": {
+    "s_0f0b1d6469aae2": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a17969-62c6-77be-a53c-0e6c5e8ba8cd",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Tim Su <timsu@users.noreply.github.com>"
+    }
+  }
+}

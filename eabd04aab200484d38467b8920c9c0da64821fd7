@@ -1,0 +1,26 @@
+bundle/index.js
+  h_5b45f84a160145 37359
+package-lock.json
+  h_5b45f84a160145 3,9
+package.json
+  h_5b45f84a160145 3
+src/convert.ts
+  h_5b45f84a160145 202,239-240
+src/models.ts
+  h_5b45f84a160145 101-103
+tests/unit-legacy-context.mjs
+  h_5b45f84a160145 28-36,42
+tests/unit-models.mjs
+  h_5b45f84a160145 45-51,100-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "eabd04aab200484d38467b8920c9c0da64821fd7",
+  "prompts": {},
+  "humans": {
+    "h_5b45f84a160145": {
+      "author": "Tim Su <timsu@users.noreply.github.com>"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+bundle/index.js
+  s_0f0b1d6469aae2::t_29a8d3ee8a909e 37597-37626,54251-54255,54292
+package-lock.json
+  s_0f0b1d6469aae2::t_6aef2b7f8f57c6 3,9
+package.json
+  s_0f0b1d6469aae2::t_6a8d5df47bd41c 3
+src/extract-tool-results.ts
+  s_0f0b1d6469aae2::t_ae369eae247c1a 48-86
+src/index.ts
+  s_0f0b1d6469aae2::t_eff65b6e0de81c 17,1860-1870,1916
+tests/unit-steered-tool-result.mjs
+  s_0f0b1d6469aae2::t_201fc32baa3fb2 1-45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f18cc02ca72f0c92ed2c7b76e53b3b88797f86f2",
+  "prompts": {},
+  "sessions": {
+    "s_0f0b1d6469aae2": {
+      "agent_id": {
+        "tool": "pi",
+        "id": "01a17969-62c6-77be-a53c-0e6c5e8ba8cd",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Tim Su <timsu@users.noreply.github.com>"
+    }
+  }
+}
