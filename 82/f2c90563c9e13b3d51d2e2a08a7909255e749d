@@ -1,0 +1,19 @@
+.github/workflows/test.yml
+  s_21a571f7b7ad0d::t_ae04d43d4c25f1 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "82f2c90563c9e13b3d51d2e2a08a7909255e749d",
+  "prompts": {},
+  "sessions": {
+    "s_21a571f7b7ad0d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68f4c9e3-2bf0-471d-a1ff-6525e1dc195d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Marius Posta <marius@distill.fyi>"
+    }
+  }
+}
